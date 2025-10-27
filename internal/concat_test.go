@@ -12,7 +12,7 @@ func TestConcat(t *testing.T) {
 			"a": map[string]any{
 				"b": map[string]any{
 					"c1": nil,
-					"c2": "hah",
+					"c2": "haha0",
 				},
 			},
 		}
@@ -29,7 +29,7 @@ func TestConcat(t *testing.T) {
 			"a": map[string]any{
 				"b": map[string]any{
 					"c1": nil,
-					"c2": "c2",
+					"c2": "haha0c2",
 				},
 			},
 		}, m)

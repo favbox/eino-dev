@@ -86,7 +86,8 @@ func Reverse[S ~[]E, E any](s S) S {
 	return d
 }
 
-// CopyMap 复制 map 到新的 map。
+// CopyMap 创建 map 的完整副本。
+// 新 map 与原 map 完全独立，修改不会相互影响。
 func CopyMap[K comparable, V any](src map[K]V) map[K]V {
 	dst := make(map[K]V, len(src))
 	for k, v := range src {

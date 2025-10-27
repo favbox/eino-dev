@@ -8,26 +8,26 @@ import (
 )
 
 func TestParseTypeName(t *testing.T) {
-	t.Run("named_struct", func(t *testing.T) {
+	t.Run("命名结构体", func(t *testing.T) {
 		type OpenAI struct{}
 		model := &OpenAI{}
 		name := ParseTypeName(reflect.ValueOf(model))
 		assert.Equal(t, "OpenAI", name)
 	})
 
-	t.Run("anonymous_struct", func(t *testing.T) {
+	t.Run("匿名结构体", func(t *testing.T) {
 		model := &struct{}{}
 		name := ParseTypeName(reflect.ValueOf(model))
 		assert.Equal(t, "", name)
 	})
 
-	t.Run("anonymous_struct_from_function", func(t *testing.T) {
+	t.Run("来自函数的匿名结构体", func(t *testing.T) {
 		model := genStruct()
 		name := ParseTypeName(reflect.ValueOf(model))
 		assert.Equal(t, "", name)
 	})
 
-	t.Run("named_interface", func(t *testing.T) {
+	t.Run("命名接口类型", func(t *testing.T) {
 		type OpenAI interface{}
 		model := OpenAI(&struct{}{})
 		name := ParseTypeName(reflect.ValueOf(model))
@@ -37,13 +37,13 @@ func TestParseTypeName(t *testing.T) {
 		assert.Equal(t, "OpenAI", name)
 	})
 
-	t.Run("named_function", func(t *testing.T) {
+	t.Run("命名函数", func(t *testing.T) {
 		f := genOpenAI
 		name := ParseTypeName(reflect.ValueOf(f))
 		assert.Equal(t, "genOpenAI", name)
 	})
 
-	t.Run("anonymous_function", func(t *testing.T) {
+	t.Run("匿名函数", func(t *testing.T) {
 		f := genAnonymousFunc()
 		name := ParseTypeName(reflect.ValueOf(f))
 		assert.Equal(t, "", name)
