@@ -1,18 +1,27 @@
 package schema
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
+	"text/template"
+
+	"github.com/nikolalohinski/gonja"
+	"github.com/nikolalohinski/gonja/config"
+	"github.com/nikolalohinski/gonja/nodes"
+	"github.com/nikolalohinski/gonja/parser"
+	"github.com/slongfield/pyfmt"
 
 	"eino/internal"
 	"eino/internal/generic"
 )
 
-func init() {
-	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
-}
+// === Layer 1: 基础定义层 (被依赖的基础) ===
+// 1.1 核心枚举和常量
 
 // RoleType 表示消息角色类型。
 type RoleType string
@@ -22,6 +31,27 @@ const (
 	User      RoleType = "user"      // 用户角色，用户发送的消息
 	System    RoleType = "system"    // 系统角色，系统消息
 	Tool      RoleType = "tool"      // 工具角色，工具调用输出
+)
+
+// FormatType 消息模板格式类型
+type FormatType uint8
+
+const (
+	// FString Python pyfmt 格式，支持 PEP-3101 格式化
+	FString FormatType = 0
+	// GoTemplate Go 标准库 text/template 格式
+	GoTemplate FormatType = 1
+	// Jinja2 Python Jinja2 模板引擎格式
+	Jinja2 FormatType = 2
+)
+
+// ImageURLDetail 表示图片 URL 的质量级别。
+type ImageURLDetail string
+
+const (
+	ImageURLDetailHigh ImageURLDetail = "high" // 高质量
+	ImageURLDetailLow  ImageURLDetail = "low"  // 低质量
+	ImageURLDetailAuto ImageURLDetail = "auto" // 自动质量
 )
 
 // ChatMessagePartType 表示聊天消息部分的类型，用于多模态消息处理。
@@ -34,6 +64,136 @@ const (
 	ChatMessagePartTypeVideoURL ChatMessagePartType = "video_url" // 视频URL类型
 	ChatMessagePartTypeFileURL  ChatMessagePartType = "file_url"  // 文件URL类型
 )
+
+// 1.2 核心接口定义
+
+// MessagesTemplate 消息模板接口，将模板渲染为消息列表
+//
+// 示例: 使用占位符引用历史消息
+//
+//	chatTemplate := prompt.FromMessages(
+//	    Schema.SystemMessage("你是一个AI助手"),
+//	    Schema.MessagesPlaceholder("history", false), // 使用参数中的"history"值
+//	)
+//	msgs, err := chatTemplate.Format(ctx, params)
+type MessagesTemplate interface {
+	Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error)
+}
+
+// === Layer 2: 核心类型定义层 ===
+
+// 2.1 核心消息结构体 (用户最关心的类型)
+
+// Message 表示聊天消息。
+type Message struct {
+	Role    RoleType `json:"role"`
+	Content string   `json:"content"`
+
+	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
+
+	AssistantGenMultiContent []MessageOutputPart `json:"assistant_output_multi_content,omitempty"`
+
+	Name string `json:"name,omitempty"`
+
+	// 仅用于 AssistantMessage
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+
+	// 仅用于 ToolMessage
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// 仅用于 ToolMessage
+	ToolName string `json:"tool_name,omitempty"`
+
+	ResponseMeta *ResponseMeta `json:"response_meta,omitempty"`
+
+	// ReasoningContent 模型的思考过程
+	// 模型返回推理内容：包含该字段；其他情况：省略该字段
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+
+	// Extra 模型实现的定制信息
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// 2.2 工具调用相关结构体
+
+// ToolCall 表示消息中的工具调用。 用于助手消息中需要执行工具调用的场景。
+type ToolCall struct {
+	// Index 多个工具调用时的标识符
+	// 流式模式下用于标识和合并工具调用块
+	Index *int `json:"index,omitempty"`
+
+	// ID 工具调用的唯一标识
+	ID string `json:"id"`
+
+	// Type 工具调用类型，默认为"function"
+	Type string `json:"type"`
+
+	// Function 要执行的函数调用
+	Function FunctionCall `json:"function"`
+
+	// Extra 工具调用的额外信息
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// FunctionCall 表示消息中的函数调用。用于助手消息中。
+type FunctionCall struct {
+	//  Name 要调用的函数名称
+	Name string `json:"name,omitempty"`
+
+	// Arguments 调用函数的参数，JSON 格式
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// 2.3 响应元数据结构体
+
+// ResponseMeta 收集聊天响应的元信息。
+type ResponseMeta struct {
+	// FinishReason 聊天响应结束的原因
+	// 通常为"stop"、"length"、"tool_calls"、"content_filter"、"null"，由聊天模型实现定义
+	FinishReason string `json:"finish_reason,omitempty"`
+
+	// Usage 聊天响应的 Token 使用量，取决于聊天模型实现是否返回
+	Usage *TokenUsage `json:"usage,omitempty"`
+
+	// LogProbs 对数概率信息
+	LogProps *LogProbs `json:"log_props,omitempty"`
+}
+
+// 2.4 Token使用相关结构体
+
+// TokenUsage 表示聊天模型请求的 Token 使用量。
+type TokenUsage struct {
+	// PromptTokens 提示词 Token 数量，包含该请求的所有输入 Token
+	PromptTokens int `json:"prompt_tokens"`
+
+	// PromptTokenDetails 提示词 Token 的详细分解
+	PromptTokenDetails PromptTokenDetails `json:"prompt_token_details"`
+
+	// Completion 完成 Token 数量
+	CompletionTokens int `json:"completion_tokens"`
+
+	// TotalTokens Token 总数量
+	TotalTokens int `json:"total_tokens"`
+}
+
+// PromptTokenDetails 表示提示词Token的详细信息。
+type PromptTokenDetails struct {
+	// CachedTokens 提示词中的缓存Token数量
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// 2.5 辅助配置结构体
+
+// toolMessageOptions - 工具消息的可选配置项。
+type toolMessageOptions struct {
+	toolName string // 工具名称
+}
+
+// 2.6 函数选项类型定义
+
+// ToolMessageOption - 工具消息配置选项函数类型。
+type ToolMessageOption func(*toolMessageOptions)
+
+// 2.7 消息部分结构体
 
 // MessagePartCommon 表示多模态类型的输入/输出的通用消息组件。
 type MessagePartCommon struct {
@@ -49,15 +209,6 @@ type MessagePartCommon struct {
 	// Extra 存储额外信息
 	Extra map[string]any `json:"extra,omitempty"`
 }
-
-// ImageURLDetail 表示图片 URL 的质量级别。
-type ImageURLDetail string
-
-const (
-	ImageURLDetailHigh ImageURLDetail = "high" // 高质量
-	ImageURLDetailLow  ImageURLDetail = "low"  // 低质量
-	ImageURLDetailAuto ImageURLDetail = "auto" // 自动质量
-)
 
 // MessageInputImage 表示消息中的图片输入部分。
 // URL 和 Base64Data 选择其一使用。
@@ -139,56 +290,7 @@ type MessageOutputPart struct {
 	Video *MessageOutputVideo `json:"video,omitempty"`
 }
 
-// FunctionCall 表示消息中的函数调用。
-// 用于助手消息中。
-type FunctionCall struct {
-	//  Name 要调用的函数名称
-	Name string `json:"name,omitempty"`
-
-	// Arguments 调用函数的参数，JSON 格式
-	Arguments string `json:"arguments,omitempty"`
-}
-
-// ToolCall 表示消息中的工具调用。
-// 用于助手消息中需要执行工具调用的场景。
-type ToolCall struct {
-	// Index 多个工具调用时的标识符
-	// 流式模式下用于标识和合并工具调用块
-	Index *int `json:"index,omitempty"`
-
-	// ID 工具调用的唯一标识
-	ID string `json:"id"`
-
-	// Type 工具调用类型，默认为"function"
-	Type string `json:"type"`
-
-	// Function 要执行的函数调用
-	Function FunctionCall `json:"function"`
-
-	// Extra 工具调用的额外信息
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// PromptTokenDetails 表示提示词Token的详细信息。
-type PromptTokenDetails struct {
-	// CachedTokens 提示词中的缓存Token数量
-	CachedTokens int `json:"cached_tokens"`
-}
-
-// TokenUsage 表示聊天模型请求的 Token 使用量。
-type TokenUsage struct {
-	// PromptTokens 提示词 Token 数量，包含该请求的所有输入 Token
-	PromptTokens int `json:"prompt_tokens"`
-
-	// PromptTokenDetails 提示词 Token 的详细分解
-	PromptTokenDetails PromptTokenDetails `json:"prompt_token_details"`
-
-	// Completion 完成 Token 数量
-	CompletionTokens int `json:"completion_tokens"`
-
-	// TotalTokens Token 总数量
-	TotalTokens int `json:"total_tokens"`
-}
+// 2.7 日志相关结构体
 
 // LogProbs 包含对数概率信息的顶级结构。
 type LogProbs struct {
@@ -228,47 +330,64 @@ type TopLogProb struct {
 	Bytes []int64 `json:"bytes,omitempty"`
 }
 
-// ResponseMeta 收集聊天响应的元信息。
-type ResponseMeta struct {
-	// FinishReason 聊天响应结束的原因
-	// 通常为"stop"、"length"、"tool_calls"、"content_filter"、"null"，由聊天模型实现定义
-	FinishReason string `json:"finish_reason,omitempty"`
+// 2.8 模板相关结构体
 
-	// Usage 聊天响应的 Token 使用量，取决于聊天模型实现是否返回
-	Usage *TokenUsage `json:"usage,omitempty"`
-
-	// LogProbs 对数概率信息
-	LogProps *LogProbs `json:"log_props,omitempty"`
+type messagesPlaceholder struct {
+	key      string
+	optional bool
 }
 
-// Message 表示聊天消息。
-type Message struct {
-	Role    RoleType `json:"role"`
-	Content string   `json:"content"`
+// === Layer 3: 公开API层 (用户最常用的功能) ===
 
-	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
+// 3.1 消息构造函数
 
-	AssistantGenMultiContent []MessageOutputPart `json:"assistant_output_multi_content,omitempty"`
-
-	Name string `json:"name,omitempty"`
-
-	// 仅用于 AssistantMessage
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-
-	// 仅用于 ToolMessage
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	// 仅用于 ToolMessage
-	ToolName string `json:"tool_name,omitempty"`
-
-	ResponseMeta *ResponseMeta `json:"response_meta,omitempty"`
-
-	// ReasoningContent 模型的思考过程
-	// 模型返回推理内容：包含该字段；其他情况：省略该字段
-	ReasoningContent string `json:"reasoning_content,omitempty"`
-
-	// Extra 模型实现的定制信息
-	Extra map[string]any `json:"extra,omitempty"`
+// SystemMessage 创建系统角色的消息
+func SystemMessage(content string) *Message {
+	return &Message{
+		Role:    System,
+		Content: content,
+	}
 }
+
+// AssistantMessage 创建助手角色的消息，支持工具调用
+func AssistantMessage(content string, toolCalls []ToolCall) *Message {
+	return &Message{
+		Role:      Assistant,
+		Content:   content,
+		ToolCalls: toolCalls,
+	}
+}
+
+// UserMessage 创建用户角色的消息
+func UserMessage(content string) *Message {
+	return &Message{
+		Role:    User,
+		Content: content,
+	}
+}
+
+// ToolMessage - 创建工具角色消息，支持可选配置。
+func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *Message {
+	o := &toolMessageOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return &Message{
+		Role:       Tool,
+		Content:    content,
+		ToolCallID: toolCallID,
+		ToolName:   o.toolName,
+	}
+}
+
+// WithToolName - 设置工具消息的工具名称选项。
+func WithToolName(name string) ToolMessageOption {
+	return func(o *toolMessageOptions) {
+		o.toolName = name
+	}
+}
+
+// 3.2 消息合并函数
 
 // ConcatMessages 合并相同角色和名称的消息。
 // 合并相同索引的工具调用，不同角色或名称的消息会返回错误。
@@ -301,7 +420,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 
 	for idx, msg := range msgs {
 		if msg == nil {
-			return nil, fmt.Errorf("消息流中意外出现nil块，索引：%d", idx)
+			return nil, fmt.Errorf("消息流中出现了意外的nil块，索引：%d", idx)
 		}
 
 		if msg.Role != "" {
@@ -453,6 +572,45 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 	return &ret, nil
 }
 
+// ConcatMessageArray - 按位置合并多个消息数组，支持空消息和长度校验。
+func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
+	arrayLen := len(mas[0])
+
+	ret := make([]*Message, arrayLen)
+	slicesToConcat := make([][]*Message, arrayLen)
+
+	for _, ma := range mas {
+		if len(ma) != arrayLen {
+			return nil, fmt.Errorf("unexpected array length. "+
+				"Got %d, expected %d", len(ma), arrayLen)
+		}
+
+		for i := 0; i < arrayLen; i++ {
+			m := ma[i]
+			if m != nil {
+				slicesToConcat[i] = append(slicesToConcat[i], m)
+			}
+		}
+	}
+
+	for i, slice := range slicesToConcat {
+		if len(slice) == 0 {
+			ret[i] = nil
+		} else if len(slice) == 1 {
+			ret[i] = slice[0]
+		} else {
+			cm, err := ConcatMessages(slice)
+			if err != nil {
+				return nil, err
+			}
+
+			ret[i] = cm
+		}
+	}
+
+	return ret, nil
+}
+
 // ConcatMessageStream 读取并合并消息流中的所有消息。
 // 自动关闭流，返回合并后的完整消息。
 func ConcatMessageStream(s *StreamReader[*Message]) (*Message, error) {
@@ -472,6 +630,232 @@ func ConcatMessageStream(s *StreamReader[*Message]) (*Message, error) {
 	}
 
 	return ConcatMessages(msgs)
+}
+
+// 3.3 模板相关函数
+
+// MessagesPlaceholder - 创建消息占位符模板，用于渲染时替换参数中的消息列表。
+//
+// 示例:
+//
+//	// 创建包含历史消息占位符的模板
+//	chatTemplate := prompt.FromMessages(
+//	        schema.SystemMessage("你是一个有用的助手"),
+//	        schema.MessagesPlaceholder("history", false), // 渲染时使用 params["history"]
+//	        schema.UserMessage("{query}"), // 用户查询消息
+//	)
+//
+//	// 准备渲染参数
+//	params := map[string]any{
+//	        "history": []*schema.Message{
+//	                {Role: "user", Content: "什么是 eino？"},
+//	                {Role: "assistant", Content: "eino 是一个很好的 LLM 应用开发框架"},
+//	        },
+//	        "query": "如何使用 eino？",
+//	}
+//
+//	// 渲染模板，history 占位符会被替换为参数中的消息列表
+//	msgs, err := chatTemplate.Format(ctx, params)
+func MessagesPlaceholder(key string, optional bool) MessagesTemplate {
+	return &messagesPlaceholder{
+		key:      key,
+		optional: optional,
+	}
+}
+
+// === Layer 4: 类型方法层 ===
+
+// 4.1 Message 方法
+
+// Format - 按指定格式渲染消息内容，支持文本和多模态内容的模板替换。
+//
+// 示例:
+//
+//	msg := schema.UserMessage("hello world, {name}")
+//	msgs, err := msg.Format(ctx, map[string]any{"name": "eino"}, schema.FString)
+//	// msgs[0].Content == "hello world, eino"
+func (m *Message) Format(_ context.Context, vs map[string]any, formatType FormatType) ([]*Message, error) {
+	c, err := formatContent(m.Content, vs, formatType)
+	if err != nil {
+		return nil, err
+	}
+	copied := *m
+	copied.Content = c
+
+	return []*Message{&copied}, nil
+}
+
+// String - 返回消息的字符串表示，包含角色、内容和工具调用等信息。
+//
+// 示例:
+//
+//	msg := schema.UserMessage("hello world")
+//	fmt.Println(msg.String()) // 输出: `user: hello world`
+//
+//	工具消息示例:
+//	msg := schema.ToolMessage("result", "call123")
+//	fmt.Println(msg.String())
+//	// 输出:
+//	// tool: result
+//	// tool_call_id: call123
+func (m *Message) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("%s: %s", m.Role, m.Content))
+	if len(m.ReasoningContent) > 0 {
+		sb.WriteString("\n推理内容:\n")
+		sb.WriteString(m.ReasoningContent)
+	}
+	if len(m.ToolCalls) > 0 {
+		sb.WriteString("\n工具调用:\n")
+		for _, tc := range m.ToolCalls {
+			if tc.Index != nil {
+				sb.WriteString(fmt.Sprintf("索引[%d]:", *tc.Index))
+			}
+			sb.WriteString(fmt.Sprintf("%+v\n", tc))
+		}
+	}
+	if m.ToolCallID != "" {
+		sb.WriteString(fmt.Sprintf("\n工具调用ID: %s", m.ToolCallID))
+	}
+	if m.ToolName != "" {
+		sb.WriteString(fmt.Sprintf("\n工具调用名称: %s", m.ToolName))
+	}
+	if m.ResponseMeta != nil {
+		sb.WriteString(fmt.Sprintf("\n完成原因: %s", m.ResponseMeta.FinishReason))
+		if m.ResponseMeta.Usage != nil {
+			sb.WriteString(fmt.Sprintf("\n用量: %v", m.ResponseMeta.Usage))
+		}
+	}
+
+	return sb.String()
+}
+
+// 4.2 其他类型方法
+
+// Format - 返回参数中指定键名的消息列表，实现占位符的渲染逻辑。
+//
+// 示例:
+//
+//	placeholder := MessagesPlaceholder("history", false)
+//	params := map[string]any{
+//	        "history": []*schema.Message{
+//	                {Role: "user", Content: "什么是 eino？"},
+//	                {Role: "assistant", Content: "eino 是一个很好的 LLM 应用开发框架"},
+//	        },
+//	        "query": "如何使用 eino？",
+//	}
+//	msgs, err := placeholder.Format(ctx, params) // 返回 params["history"] 的消息列表
+func (p *messagesPlaceholder) Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error) {
+	v, ok := vs[p.key]
+	if !ok {
+		if p.optional {
+			return []*Message{}, nil
+		}
+
+		return nil, fmt.Errorf("消息占位符格式化：未找到键 '%s'", p.key)
+	}
+
+	msgs, ok := v.([]*Message)
+	if !ok {
+		return nil, fmt.Errorf("消息占位符只能使用消息列表格式化，键: '%v'，实际类型: %v", p.key, reflect.TypeOf(v))
+	}
+
+	return msgs, nil
+}
+
+// === Layer 5: 内部工具函数层 ===
+
+// 5.1 内部实现
+
+func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
+	var merged []ToolCall
+	m := make(map[int][]int)
+	for i := range chunks {
+		index := chunks[i].Index
+		if index == nil {
+			merged = append(merged, chunks[i])
+		} else {
+			m[*index] = append(m[*index], i)
+		}
+	}
+
+	var args strings.Builder
+	for k, v := range m {
+		index := k
+		toolCall := ToolCall{Index: &index}
+		if len(v) > 0 {
+			toolCall = chunks[v[0]]
+		}
+
+		args.Reset()
+		toolID, toolType, toolName := "", "", "" // 这些字段将在任何块中原子性地输出
+
+		for _, n := range v {
+			chunk := chunks[n]
+			if chunk.ID != "" {
+				if toolID == "" {
+					toolID = chunk.ID
+				} else if toolID != chunk.ID {
+					return nil, fmt.Errorf("无法连接不同ID的工具调用：'%s' '%s'", toolID, chunk.ID)
+				}
+
+			}
+
+			if chunk.Type != "" {
+				if toolType == "" {
+					toolType = chunk.Type
+				} else if toolType != chunk.Type {
+					return nil, fmt.Errorf("无法连接不同类型的工具调用：'%s' '%s'", toolType, chunk.Type)
+				}
+			}
+
+			if chunk.Function.Name != "" {
+				if toolName == "" {
+					toolName = chunk.Function.Name
+				} else if toolName != chunk.Function.Name {
+					return nil, fmt.Errorf("无法连接不同名称的工具调用：'%s' '%s'", toolName, chunk.Function.Name)
+				}
+			}
+
+			if chunk.Function.Arguments != "" {
+				_, err := args.WriteString(chunk.Function.Arguments)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		toolCall.ID = toolID
+		toolCall.Type = toolType
+		toolCall.Function.Name = toolName
+		toolCall.Function.Arguments = args.String()
+
+		merged = append(merged, toolCall)
+	}
+
+	if len(merged) > 1 {
+		sort.SliceStable(merged, func(i, j int) bool {
+			iVal, jVal := merged[i].Index, merged[j].Index
+			if iVal == nil && jVal == nil {
+				return false
+			} else if iVal == nil && jVal != nil {
+				return true
+			} else if iVal != nil && jVal == nil {
+				return false
+			}
+
+			return *iVal < *jVal
+		})
+	}
+
+	return merged, nil
+}
+
+func isBase64AudioPart(part MessageOutputPart) bool {
+	return part.Type == ChatMessagePartTypeAudioURL &&
+		part.Audio != nil &&
+		part.Audio.Base64Data != nil &&
+		part.Audio.URL == nil
 }
 
 // 合并助手生成的多个内容部分。
@@ -573,13 +957,6 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 	return merged, nil
 }
 
-func isBase64AudioPart(part MessageOutputPart) bool {
-	return part.Type == ChatMessagePartTypeAudioURL &&
-		part.Audio != nil &&
-		part.Audio.Base64Data != nil &&
-		part.Audio.URL == nil
-}
-
 func concatExtra(extraList []map[string]any) (map[string]any, error) {
 	if len(extraList) == 1 {
 		return generic.CopyMap(extraList[0]), nil
@@ -588,86 +965,108 @@ func concatExtra(extraList []map[string]any) (map[string]any, error) {
 	return internal.ConcatItems(extraList)
 }
 
-func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
-	var merged []ToolCall
-	m := make(map[int][]int)
-	for i := range chunks {
-		index := chunks[i].Index
-		if index == nil {
-			merged = append(merged, chunks[i])
-		} else {
-			m[*index] = append(m[*index], i)
+// formatContent - 根据指定格式类型渲染内容模板，支持 FString、GoTemplate 和 Jinja2。
+func formatContent(content string, vs map[string]any, formatType FormatType) (string, error) {
+	switch formatType {
+	case FString:
+		return pyfmt.Fmt(content, vs)
+	case GoTemplate:
+		parsedTmpl, err := template.New("template").
+			Option("missingkey=error").
+			Parse(content)
+		if err != nil {
+			return "", err
 		}
-	}
-
-	var args strings.Builder
-	for k, v := range m {
-		index := k
-		toolCall := ToolCall{Index: &index}
-		if len(v) > 0 {
-			toolCall = chunks[v[0]]
+		sb := new(strings.Builder)
+		err = parsedTmpl.Execute(sb, vs)
+		if err != nil {
+			return "", err
 		}
+		return sb.String(), nil
+	case Jinja2:
+		env, err := getJinjaEnv()
+		if err != nil {
+			return "", err
+		}
+		tpl, err := env.FromString(content)
+		if err != nil {
+			return "", err
+		}
+		out, err := tpl.Execute(vs)
+		if err != nil {
+			return "", err
+		}
+		return out, nil
+	default:
+		return "", fmt.Errorf("未知的格式类型: %v", formatType)
+	}
+}
 
-		args.Reset()
-		toolID, toolType, toolName := "", "", "" // 这些字段将在任何块中原子性地输出
+// 5.2 模板工具函数
 
-		for _, n := range v {
-			chunk := chunks[n]
-			if chunk.ID != "" {
-				if toolID == "" {
-					toolID = chunk.ID
-				} else if toolID != chunk.ID {
-					return nil, fmt.Errorf("无法连接不同ID的工具调用：'%s' '%s'", toolID, chunk.ID)
-				}
+const (
+	jinjaInclude = "include" // Jinja 包含语法
+	jinjaExtends = "extends" // Jinja 继承语法
+	jinjaImport  = "import"  // Jinja 导入语法
+	jinjaFrom    = "from"    // Jinja 变量引用语法
+)
 
-			}
+var jinjaEnvOnce sync.Once      // 确保只初始化一次
+var jinjaEnv *gonja.Environment // 全局环境实例
+var envInitErr error            // 初始化错误状态
 
-			if chunk.Type != "" {
-				if toolType == "" {
-					toolType = chunk.Type
-				} else if toolType != chunk.Type {
-					return nil, fmt.Errorf("无法连接不同类型的工具调用：'%s' '%s'", toolType, chunk.Type)
-				}
-			}
-
-			if chunk.Function.Name != "" {
-				if toolName == "" {
-					toolName = chunk.Function.Name
-				} else if toolName != chunk.Function.Name {
-					return nil, fmt.Errorf("无法连接不同名称的工具调用：'%s' '%s'", toolName, chunk.Function.Name)
-				}
-			}
-
-			if chunk.Function.Arguments != "" {
-				_, err := args.WriteString(chunk.Function.Arguments)
-				if err != nil {
-					return nil, err
-				}
+func getJinjaEnv() (*gonja.Environment, error) {
+	jinjaEnvOnce.Do(func() {
+		jinjaEnv = gonja.NewEnvironment(config.DefaultConfig, gonja.DefaultLoader)
+		formatInitError := "init jinja env fail: %w"
+		var err error
+		if jinjaEnv.Statements.Exists(jinjaInclude) {
+			err = jinjaEnv.Statements.Replace(jinjaInclude, func(parser *parser.Parser, args *parser.Parser) (nodes.Statement, error) {
+				return nil, fmt.Errorf("keyword[include] has been disabled")
+			})
+			if err != nil {
+				envInitErr = fmt.Errorf(formatInitError, err)
+				return
 			}
 		}
-
-		toolCall.ID = toolID
-		toolCall.Type = toolType
-		toolCall.Function.Name = toolName
-		toolCall.Function.Arguments = args.String()
-
-		merged = append(merged, toolCall)
-	}
-
-	if len(merged) > 1 {
-		sort.SliceStable(merged, func(i, j int) bool {
-			iVal, jVal := merged[i].Index, merged[j].Index
-			if iVal == nil && jVal == nil {
-				return false
-			} else if iVal == nil && jVal != nil {
-				return true
-			} else if iVal != nil && jVal == nil {
-				return false
+		if jinjaEnv.Statements.Exists(jinjaExtends) {
+			err = jinjaEnv.Statements.Replace(jinjaExtends, func(parser *parser.Parser, args *parser.Parser) (nodes.Statement, error) {
+				return nil, fmt.Errorf("keyword[extends] has been disabled")
+			})
+			if err != nil {
+				envInitErr = fmt.Errorf(formatInitError, err)
+				return
 			}
+		}
+		if jinjaEnv.Statements.Exists(jinjaFrom) {
+			err = jinjaEnv.Statements.Replace(jinjaFrom, func(parser *parser.Parser, args *parser.Parser) (nodes.Statement, error) {
+				return nil, fmt.Errorf("keyword[from] has been disabled")
+			})
+			if err != nil {
+				envInitErr = fmt.Errorf(formatInitError, err)
+				return
+			}
+		}
+		if jinjaEnv.Statements.Exists(jinjaImport) {
+			err = jinjaEnv.Statements.Replace(jinjaImport, func(parser *parser.Parser, args *parser.Parser) (nodes.Statement, error) {
+				return nil, fmt.Errorf("keyword[import] has been disabled")
+			})
+			if err != nil {
+				envInitErr = fmt.Errorf(formatInitError, err)
+				return
+			}
+		}
+	})
+	return jinjaEnv, envInitErr
+}
 
-			return *iVal < *jVal
-		})
-	}
+// 5.3 类型断言（验证实现关系）
+var _ MessagesTemplate = &Message{}                     // 验证 Message 实现接口
+var _ MessagesTemplate = MessagesPlaceholder("", false) // 验证占位符实现接口
 
-	return merged, nil
+// 5.4 包初始化
+
+func init() {
+	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
+	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
 }

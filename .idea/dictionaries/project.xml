@@ -2,7 +2,9 @@
   <dictionary name="project">
     <words>
       <w>logprob</w>
+      <w>missingkey</w>
       <w>probs</w>
+      <w>pyfmt</w>
       <w>recv</w>
     </words>
   </dictionary>
