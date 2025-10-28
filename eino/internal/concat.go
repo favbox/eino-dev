@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"eino/internal/generic"
+	"github.com/favbox/eino/internal/generic"
 )
 
 var (

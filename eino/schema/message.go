@@ -16,8 +16,8 @@ import (
 	"github.com/nikolalohinski/gonja/parser"
 	"github.com/slongfield/pyfmt"
 
-	"eino/internal"
-	"eino/internal/generic"
+	"github.com/favbox/eino/internal"
+	"github.com/favbox/eino/internal/generic"
 )
 
 // === Layer 1: 基础定义层 (被依赖的基础) ===
@@ -423,6 +423,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			return nil, fmt.Errorf("消息流中出现了意外的nil块，索引：%d", idx)
 		}
 
+		// 角色校验
 		if msg.Role != "" {
 			if ret.Role == "" {
 				ret.Role = msg.Role
@@ -431,6 +432,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			}
 		}
 
+		// 名称校验
 		if msg.Name != "" {
 			if ret.Name == "" {
 				ret.Name = msg.Name
@@ -439,6 +441,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			}
 		}
 
+		// 工具调用ID校验
 		if msg.ToolCallID != "" {
 			if ret.ToolCallID == "" {
 				ret.ToolCallID = msg.ToolCallID
@@ -446,6 +449,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 				return nil, fmt.Errorf("无法连接不同工具调用ID的消息：%s %s", ret.ToolCallID, msg.ToolCallID)
 			}
 		}
+		// 工具调用名称校验
 		if msg.ToolName != "" {
 			if ret.ToolName == "" {
 				ret.ToolName = msg.ToolName
@@ -454,19 +458,24 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			}
 		}
 
+		// 收集内容
 		if msg.Content != "" {
 			contents = append(contents, msg.Content)
 			contentLen += len(msg.Content)
 		}
+
+		// 收集推理内容
 		if msg.ReasoningContent != "" {
 			reasoningContents = append(reasoningContents, msg.ReasoningContent)
 			reasoningContentLen += len(msg.ReasoningContent)
 		}
 
+		// 收集工具调用
 		if len(msg.ToolCalls) > 0 {
 			toolCalls = append(toolCalls, msg.ToolCalls...)
 		}
 
+		// 收集额外信息
 		if len(msg.Extra) > 0 {
 			extraList = append(extraList, msg.Extra)
 		}
@@ -516,6 +525,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		}
 	}
 
+	// 合并文本内容
 	if len(contents) > 0 {
 		var sb strings.Builder
 		sb.Grow(contentLen)
@@ -528,6 +538,8 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 
 		ret.Content = sb.String()
 	}
+
+	// 合并推理内容
 	if len(reasoningContents) > 0 {
 		var sb strings.Builder
 		sb.Grow(reasoningContentLen)
@@ -541,6 +553,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		ret.ReasoningContent = sb.String()
 	}
 
+	// 合并工具调用
 	if len(toolCalls) > 0 {
 		merged, err := concatToolCalls(toolCalls)
 		if err != nil {

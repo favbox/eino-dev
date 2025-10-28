@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"eino/internal/generic"
+	"github.com/favbox/eino/internal/generic"
 )
 
 func TestMessageTemplate(t *testing.T) {

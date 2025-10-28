@@ -10,7 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"eino/internal/safe"
+	"github.com/favbox/eino/internal/safe"
 )
 
 // === Layer 1: 公开API层 (用户立即看到) ===
