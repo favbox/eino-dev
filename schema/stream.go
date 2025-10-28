@@ -424,7 +424,7 @@ func (sr *StreamReader[T]) SetAutomaticClose() {
 				s.automaticClose = true
 				var flag uint32
 				s.closedFlag = &flag
-				runtime.SetFinalizer(sr, func(st *stream[T]) {
+				runtime.SetFinalizer(s, func(st *stream[T]) {
 					st.closeRecv()
 				})
 			}

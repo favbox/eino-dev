@@ -155,7 +155,7 @@ type ResponseMeta struct {
 	Usage *TokenUsage `json:"usage,omitempty"`
 
 	// LogProbs 对数概率信息
-	LogProps *LogProbs `json:"log_props,omitempty"`
+	LogProbs *LogProbs `json:"log_probs,omitempty"`
 }
 
 // 2.4 Token使用相关结构体
@@ -443,14 +443,14 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			if ret.ToolCallID == "" {
 				ret.ToolCallID = msg.ToolCallID
 			} else if ret.ToolCallID != msg.ToolCallID {
-				return nil, fmt.Errorf("无法连接不同 toolCallID 的消息：%s %s", ret.ToolCallID, msg.ToolCallID)
+				return nil, fmt.Errorf("无法连接不同工具调用ID的消息：%s %s", ret.ToolCallID, msg.ToolCallID)
 			}
 		}
 		if msg.ToolName != "" {
 			if ret.ToolName == "" {
 				ret.ToolName = msg.ToolName
 			} else if ret.ToolName != msg.ToolName {
-				return nil, fmt.Errorf("无法连接不同 toolName 的消息：%s %s", ret.ToolName, msg.ToolName)
+				return nil, fmt.Errorf("无法连接不同工具调用名称的消息：%s %s", ret.ToolName, msg.ToolName)
 			}
 		}
 
@@ -505,12 +505,12 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 				}
 			}
 
-			if msg.ResponseMeta.LogProps != nil {
-				if ret.ResponseMeta.LogProps == nil {
-					ret.ResponseMeta.LogProps = &LogProbs{}
+			if msg.ResponseMeta.LogProbs != nil {
+				if ret.ResponseMeta.LogProbs == nil {
+					ret.ResponseMeta.LogProbs = &LogProbs{}
 				}
 
-				ret.ResponseMeta.LogProps.Content = append(ret.ResponseMeta.LogProps.Content, msg.ResponseMeta.LogProps.Content...)
+				ret.ResponseMeta.LogProbs.Content = append(ret.ResponseMeta.LogProbs.Content, msg.ResponseMeta.LogProbs.Content...)
 			}
 
 		}
@@ -796,7 +796,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 				if toolID == "" {
 					toolID = chunk.ID
 				} else if toolID != chunk.ID {
-					return nil, fmt.Errorf("无法连接不同ID的工具调用：'%s' '%s'", toolID, chunk.ID)
+					return nil, fmt.Errorf("无法连接不同工具调用ID的工具调用：'%s' '%s'", toolID, chunk.ID)
 				}
 
 			}
@@ -805,7 +805,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 				if toolType == "" {
 					toolType = chunk.Type
 				} else if toolType != chunk.Type {
-					return nil, fmt.Errorf("无法连接不同类型的工具调用：'%s' '%s'", toolType, chunk.Type)
+					return nil, fmt.Errorf("无法连接不同工具类型的工具调用：'%s' '%s'", toolType, chunk.Type)
 				}
 			}
 
@@ -813,7 +813,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 				if toolName == "" {
 					toolName = chunk.Function.Name
 				} else if toolName != chunk.Function.Name {
-					return nil, fmt.Errorf("无法连接不同名称的工具调用：'%s' '%s'", toolName, chunk.Function.Name)
+					return nil, fmt.Errorf("无法连接不同工具名称的工具调用：'%s' '%s'", toolName, chunk.Function.Name)
 				}
 			}
 
