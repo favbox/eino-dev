@@ -2,6 +2,6 @@ go 1.24.4
 
 use (
 	./eino
-	./eino-examples
 	./eino-ext
+	./eino-examples
 )
