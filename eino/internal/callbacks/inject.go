@@ -246,7 +246,7 @@ func OnEndWithStreamOutputHandle[T any](ctx context.Context, output *schema.Stre
 
 // OnErrorHandle 执行组件错误时的回调处理。
 //
-// 按照从前往后的顺序遍历处理器链，执行每个处理器的OnError方法，
+// 按照从前往后的顺序遍历处理器链，执行每个处理器的 OnError 方法，
 // 确保错误信息能够被所有处理器捕获和处理，提供统一的错误处理机制。
 func OnErrorHandle(ctx context.Context, err error,
 	runInfo *RunInfo, handlers []Handler) (context.Context, error) {
