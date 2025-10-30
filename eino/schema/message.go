@@ -39,10 +39,10 @@ type FormatType uint8
 const (
 	// FString Python pyfmt 格式，支持 PEP-3101 格式化
 	FString FormatType = 0
-	// GoTemplate Go 标准库 text/template 格式
-	GoTemplate FormatType = 1
 	// Jinja2 Python Jinja2 模板引擎格式
 	Jinja2 FormatType = 2
+	// GoTemplate Go 标准库 text/template 格式
+	GoTemplate FormatType = 1
 )
 
 // ImageURLDetail 表示图片 URL 的质量级别。
