@@ -86,11 +86,15 @@ type MessagesTemplate interface {
 
 // Message 表示聊天消息。
 type Message struct {
-	Role    RoleType `json:"role"`
-	Content string   `json:"content"`
+	Role RoleType `json:"role"`
 
+	// Content 用于用户文本输入和模型文本输出。
+	Content string `json:"content"`
+
+	// UserInputMultiContent 传递用户提供的多模态内容给模型。
 	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
 
+	// AssistantGenMultiContent 用于接收模型的多模态输出。
 	AssistantGenMultiContent []MessageOutputPart `json:"assistant_output_multi_content,omitempty"`
 
 	Name string `json:"name,omitempty"`
@@ -105,7 +109,7 @@ type Message struct {
 
 	ResponseMeta *ResponseMeta `json:"response_meta,omitempty"`
 
-	// ReasoningContent 模型的思考过程
+	// ReasoningContent 模型的思考过程。
 	// 模型返回推理内容：包含该字段；其他情况：省略该字段
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 
