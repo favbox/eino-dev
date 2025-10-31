@@ -55,12 +55,17 @@ func IsCallbacksEnabled(i any) bool {
 type Component string
 
 const (
-	ComponentOfPrompt      Component = "ChatTemplate"        // 提示词模板组件
-	ComponentOfChatModel   Component = "ChatModel"           // 聊天模型组件
-	ComponentOfEmbedding   Component = "Embedding"           // 嵌入模型组件
-	ComponentOfIndexer     Component = "Indexer"             // 索引器组件
-	ComponentOfRetriever   Component = "Retriever"           // 检索器组件
+	// 模具提：模型——工具——提示词
+
+	ComponentOfChatModel Component = "ChatModel"    // 聊天模型组件
+	ComponentOfTool      Component = "Tool"         // 工具组件
+	ComponentOfPrompt    Component = "ChatTemplate" // 提示词模板组件
+
+	// 文嵌检索：文档——嵌入——检索器——索引器
+
 	ComponentOfLoader      Component = "Loader"              // 文档加载器组件
 	ComponentOfTransformer Component = "DocumentTransformer" // 文档转换器组件
-	ComponentOfTool        Component = "Tool"                // 工具组件
+	ComponentOfEmbedding   Component = "Embedding"           // 嵌入模型组件
+	ComponentOfRetriever   Component = "Retriever"           // 检索器组件
+	ComponentOfIndexer     Component = "Indexer"             // 索引器组件
 )
