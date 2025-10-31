@@ -41,6 +41,10 @@ type BaseChatModel interface {
 	Stream(ctx context.Context, input []*schema.Message, opts ...Option) (*schema.StreamReader[*schema.Message], error)
 }
 
+// ToolCallingChatModel 扩展了 BaseChatModel，添加了工具调用能力。
+//
+// 它提供了 WithTools 方法，返回绑定指定工具的新实例，
+// 避免了状态修改和并发问题。
 type ToolCallingChatModel interface {
 	BaseChatModel
 
