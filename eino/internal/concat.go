@@ -9,6 +9,8 @@ import (
 	"github.com/favbox/eino/internal/generic"
 )
 
+// concatFuncs 内置合并函数映射表
+// 为常见类型预定义合并策略：字符串使用连接，其他类型使用"取最后一个非零值"
 var (
 	concatFuncs = map[reflect.Type]any{
 		generic.TypeOf[string]():        concatStrings,
@@ -30,7 +32,7 @@ var (
 	}
 )
 
-// 高效拼接字符串切片。
+// concatStrings 拼接字符串 - 使用 strings.Builder 优化性能
 func concatStrings(ss []string) (string, error) {
 	var n int
 	for _, s := range ss {
@@ -55,12 +57,13 @@ func useLast[T any](s []T) (T, error) {
 }
 
 // RegisterStreamChunkConcatFunc 注册类型 T 的流块合并函数。
+// 向全局映射表添加自定义合并逻辑，支持流式数据块的高效合并
 func RegisterStreamChunkConcatFunc[T any](fn func([]T) (T, error)) {
 	concatFuncs[generic.TypeOf[T]()] = fn
 }
 
 // GetConcatFunc 获取指定类型的流块合并函数。
-// 返回通用的 reflect.Value 处理函数。
+// 根据类型返回对应的合并策略，支持反射调用
 func GetConcatFunc(typ reflect.Type) func(reflect.Value) (reflect.Value, error) {
 	if fn, ok := concatFuncs[typ]; ok {
 		return func(a reflect.Value) (reflect.Value, error) {
@@ -76,13 +79,9 @@ func GetConcatFunc(typ reflect.Type) func(reflect.Value) (reflect.Value, error) 
 	return nil
 }
 
-// ConcatItems 合并多个元素为单个元素。
-//
-// 支持 map 和 slice 类型：
-//   - map: 相同 key 的值收集到 slice，单值时直接存储
-//   - slice: 优先使用注册函数，否则只允许一个非空元素。
-//
-// 调用方需确保 len(items) > 1。
+// ConcatItems 合并多个值 - 支持 Map 和 Slice 两种类型。
+// 参数：items 为长度大于 1 的值切片。
+// 返回：合并后的单一值
 func ConcatItems[T any](items []T) (T, error) {
 	typ := generic.TypeOf[T]()
 	v := reflect.ValueOf(items)
@@ -90,11 +89,12 @@ func ConcatItems[T any](items []T) (T, error) {
 	var cv reflect.Value
 	var err error
 
-	// 根据类型选择合并策略：进入不同类型的合并流程
+	// 处理 Map 类型：递归合并键值对
 	if typ.Kind() == reflect.Map {
-		cv, err = concatMaps(v) // map 类型合并
+		cv, err = concatMaps(v)
 	} else {
-		cv, err = concatSliceValue(v) // slice 类型合并
+		// 处理 Slice 类型：使用合并策略或取最后一个非零值
+		cv, err = concatSliceValue(v)
 	}
 
 	if err != nil {
@@ -173,22 +173,26 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 	return ret, nil
 }
 
-// concatSliceValue 合并切片元素为单个值。
+// concatSliceValue 合并切片值 - 支持自定义合并策略。
 // 优先使用注册的合并函数，否则处理空值和单值情况。
 func concatSliceValue(val reflect.Value) (reflect.Value, error) {
 	elmType := val.Type().Elem()
 
+	// 单元素切片直接返回
 	if val.Len() == 1 {
 		return val.Index(0), nil
 	}
 
-	// 尝试使用注册的合并函数进行合并
+	// 优先使用自定义合并函数
 	f := GetConcatFunc(elmType)
 	if f != nil {
 		return f(val)
 	}
 
-	// 没有注册合并函数时的处理： 只允许一个非空元素
+	// 回退策略：检查唯一非零值
+	// - 所有元素都为零：返回零值
+	// - 只有一个非零值：返回该值
+	// - 多个非零值：报错
 	var filtered reflect.Value
 	for i := 0; i < val.Len(); i++ {
 		oneVal := val.Index(i)
@@ -207,8 +211,8 @@ func concatSliceValue(val reflect.Value) (reflect.Value, error) {
 	return filtered, nil
 }
 
-// toSliceValue 将 any 切片转换为指定类型的切片。
-// 确保所有元素类型一致，否则返回错误。
+// toSliceValue 将 []any 转换为指定类型的切片。
+// 类型检查：确保所有元素类型一致
 func toSliceValue(vs []any) (reflect.Value, error) {
 	typ := reflect.TypeOf(vs[0])
 
