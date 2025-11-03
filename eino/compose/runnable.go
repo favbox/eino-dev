@@ -31,15 +31,6 @@ type Runnable[I, O any] interface {
 	//
 	// 类似 "ping => pong" 的直接调用模式。
 	// 输入和输出都是同步的，适合大多数场景。
-	//
-	// 参数：
-	//   - ctx：上下文，控制超时和取消
-	//   - input：输入数据
-	//   - opts：执行选项
-	//
-	// 返回：
-	//   - output：输出结果
-	//   - err：执行错误
 	Invoke(ctx context.Context, input I, opts ...Option) (output O, err error)
 
 	// Stream 流式输出模式。

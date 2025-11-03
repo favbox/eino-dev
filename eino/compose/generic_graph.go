@@ -61,10 +61,11 @@ func WithGenLocalState[S any](gls GenLocalState[S]) NewGraphOption {
 
 // ====== 图创建与构建 ======
 
-// NewGraph 创建有向图 - 支持组件、Lambda、Chain、并行等的灵活组合
+// NewGraph 创建有向图 - 支持组件、Lambda、Chain、并行等的灵活组合。
+//
 // 同时提供灵活且多粒度的切面治理能力
-// I: 图编译产物的输入类型
-// O: 图编译产物的输出类型
+//
+// I: 图编译产物的输入类型； O: 图编译产物的输出类型
 //
 // 要在节点间共享状态，请使用 WithGenLocalState 选项：
 //
