@@ -7,6 +7,7 @@
       <w>probs</w>
       <w>pyfmt</w>
       <w>recv</w>
+      <w>vectorstore</w>
       <w>vikingdb</w>
     </words>
   </dictionary>

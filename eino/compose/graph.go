@@ -17,39 +17,22 @@ import (
 	"github.com/favbox/eino/internal/gmap"
 )
 
-// ========== 核心常量定义 ==========
-
-// START 图起始节点标识符 - 所有图的执行入口点，保留字
+// START 图起始节点标识符，保留字。
 const START = "start"
 
-// END 图终止节点标识符 - 所有执行路径的终点，保留字
+// END 图终止节点标识符，保留字。
 const END = "end"
 
-// ========== 图运行模式定义 ==========
-
-// graphRunType 是控制图运行模式的自定义类型。
-// 设计意图：支持两种不同的图执行模式，以适应不同的业务场景。
+// graphRunType 图运行模式类型。
 type graphRunType string
 
 const (
-	// runTypePregel 是适合大规模图处理任务的运行模式。
-	// 设计意图：支持带有循环的图结构，使用 Pregel 算法思想进行消息传递和迭代计算。
-	// 适用场景：
-	//   - 支持图中的循环结构
-	//   - 适用于动态执行流程
-	//   - 大规模图数据处理
-	//   - 迭代计算和收敛算法
-	// 兼容性：兼容 NodeTriggerType.AnyPredecessor（任意前置节点触发）
+	// runTypePregel Pregel 模式，支持循环结构和动态执行流程。
+	// 兼容 NodeTriggerMode.AnyPredecessor（任意前置节点触发）。
 	runTypePregel graphRunType = "Pregel"
 
-	// runTypeDAG 是有向无环图的运行模式。
-	// 设计意图：表示为有向无环图，适合可以表示为 DAG 的任务。
-	// 适用场景：
-	//   - 固定执行流程
-	//   - 不允许循环的拓扑结构
-	//   - 静态图分析
-	//   - Workflow 模式的强制执行
-	// 兼容性：兼容 NodeTriggerType.AllPredecessor（所有前置节点完成后触发）
+	// runTypeDAG 有向无环图模式，不允许循环结构。
+	// 兼容 NodeTriggerMode.AllPredecessor（所有前置节点完成后触发）。
 	runTypeDAG graphRunType = "DAG"
 )
 
@@ -58,104 +41,49 @@ func (g graphRunType) String() string {
 	return string(g)
 }
 
-// ========== Graph 核心结构体定义 ==========
-
-// graph 是图的核心数据结构，封装了所有与图相关的状态和逻辑。
-// 设计意图：提供完整的图构建、验证和编译功能，支持复杂的图结构和执行模式。
-// 特点：
-//   - 支持动态图构建（Pregel 模式）和静态图分析（DAG 模式）
-//   - 完整的状态管理和类型验证机制
-//   - 支持数据流、控制流和条件分支
-//   - 内置字段映射和类型转换机制
-//
-// 字段说明：
-//   - nodes: 图中所有节点的映射，键为节点键，值为节点对象
-//   - controlEdges: 控制边映射，表示节点间的执行依赖关系（但不传递数据）
-//   - dataEdges: 数据边映射，表示节点间的数据传递关系
-//   - branches: 分支映射，表示条件执行的分支路径
-//   - startNodes: 起始节点列表，从 START 开始的直接后继节点
-//   - endNodes: 终止节点列表，以 END 结尾的直接前驱节点
-//   - toValidateMap: 类型验证映射表，记录待验证的边和字段映射
-//   - stateType/stateGenerator: 状态管理相关，支持状态共享和持久化
-//   - expectedInputType/expectedOutputType: 图的预期输入输出类型
-//   - genericHelper: 通用辅助系统，提供类型转换和流处理能力
-//   - fieldMappingRecords: 字段映射记录，支持结构体级别的数据映射
-//   - buildError: 构建错误信息，用于错误传播
-//   - cmp: 组件类型标识（Graph/Chain/Workflow）
-//   - compiled: 编译状态标记，防止重复编译
-//   - handler*: 各种处理器映射，支持运行时类型转换和数据处理
+// graph 图的核心数据结构。
 type graph struct {
-	// 核心图结构
-	nodes        map[string]*graphNode     // 节点映射表
-	controlEdges map[string][]string       // 控制边映射（执行依赖）
-	dataEdges    map[string][]string       // 数据边映射（数据传递）
-	branches     map[string][]*GraphBranch // 分支映射（条件执行）
-	startNodes   []string                  // 起始节点列表
-	endNodes     []string                  // 终止节点列表
+	nodes        map[string]*graphNode
+	controlEdges map[string][]string
+	dataEdges    map[string][]string
+	branches     map[string][]*GraphBranch
+	startNodes   []string
+	endNodes     []string
 
-	// 类型验证和映射
 	toValidateMap map[string][]struct {
 		endNode  string
 		mappings []*FieldMapping
-	} // 待验证映射表
+	}
 
-	// 状态管理
-	stateType      reflect.Type                  // 状态类型
-	stateGenerator func(ctx context.Context) any // 状态生成器
-	newOpts        []NewGraphOption              // 图创建选项
+	stateType      reflect.Type
+	stateGenerator func(ctx context.Context) any
+	newOpts        []NewGraphOption
 
-	// 类型系统
-	expectedInputType, expectedOutputType reflect.Type // 预期输入输出类型
+	expectedInputType, expectedOutputType reflect.Type
 
-	*genericHelper // 通用辅助系统（类型转换、流处理等）
+	*genericHelper
 
-	// 字段映射
-	fieldMappingRecords map[string][]*FieldMapping // 字段映射记录
+	fieldMappingRecords map[string][]*FieldMapping
 
-	// 错误和状态
-	buildError error     // 构建错误
-	cmp        component // 组件类型标识
+	buildError error
+	cmp        component
 
-	compiled bool // 编译状态标记
+	compiled bool
 
-	// 处理器映射
-	handlerOnEdges   map[string]map[string][]handlerPair // 边上的处理器
-	handlerPreNode   map[string][]handlerPair            // 节点前置处理器
-	handlerPreBranch map[string][][]handlerPair          // 分支前置处理器
+	handlerOnEdges   map[string]map[string][]handlerPair
+	handlerPreNode   map[string][]handlerPair
+	handlerPreBranch map[string][][]handlerPair
 }
 
-// ========== Graph 构造函数定义 ==========
-
-// newGraphConfig 是创建图时的配置结构体。
-// 设计意图：封装图创建所需的所有参数，提供类型安全和清晰的接口。
-// 字段说明：
-//   - inputType/outputType: 图的输入输出类型，基于泛型自动推断
-//   - gh: 通用辅助系统，包含类型转换和流处理能力
-//   - cmp: 组件类型标识（Graph/Chain/Workflow）
-//   - stateType/stateGenerator: 状态管理相关
-//   - newOpts: 图创建时的额外选项
 type newGraphConfig struct {
-	inputType, outputType reflect.Type                  // 图的输入输出类型
-	gh                    *genericHelper                // 通用辅助系统
-	cmp                   component                     // 组件类型标识
-	stateType             reflect.Type                  // 状态类型
-	stateGenerator        func(ctx context.Context) any // 状态生成器
-	newOpts               []NewGraphOption              // 图创建选项
+	inputType, outputType reflect.Type
+	gh                    *genericHelper
+	cmp                   component
+	stateType             reflect.Type
+	stateGenerator        func(ctx context.Context) any
+	newOpts               []NewGraphOption
 }
 
-// newGraphFromGeneric 是基于泛型类型创建图的工厂函数。
-// 设计意图：提供类型安全的图创建接口，自动处理泛型类型推断。
-// 泛型参数：
-//   - I: 图的输入类型
-//   - O: 图的输出类型
-//
-// 参数：
-//   - cmp: 组件类型标识
-//   - stateGenerator: 状态生成器，可选
-//   - stateType: 状态类型
-//   - opts: 图创建选项列表
-//
-// 返回：配置完整的图对象
 func newGraphFromGeneric[I, O any](
 	cmp component,
 	stateGenerator func(ctx context.Context) any,
@@ -163,78 +91,53 @@ func newGraphFromGeneric[I, O any](
 	opts []NewGraphOption,
 ) *graph {
 	return newGraph(&newGraphConfig{
-		inputType:      generic.TypeOf[I](),      // 自动推断输入类型
-		outputType:     generic.TypeOf[O](),      // 自动推断输出类型
-		gh:             newGenericHelper[I, O](), // 创建通用辅助系统
+		inputType:      generic.TypeOf[I](),
+		outputType:     generic.TypeOf[O](),
+		gh:             newGenericHelper[I, O](),
 		cmp:            cmp,
 		stateType:      stateType,
 		stateGenerator: stateGenerator,
 		newOpts:        opts,
 	})
 }
-
-// newGraph 是图的构造函数，基于配置对象创建图实例。
-// 设计意图：统一初始化所有图字段，确保图的初始状态一致性。
-// 参数：
-//   - cfg: 图配置对象，包含所有初始化参数
-//
-// 返回：初始化完成的图对象，所有字段都已准备好接受节点和边的添加
 func newGraph(cfg *newGraphConfig) *graph {
 	return &graph{
-		// 核心图结构初始化
-		nodes:        make(map[string]*graphNode),     // 空节点映射
-		dataEdges:    make(map[string][]string),       // 空数据边映射
-		controlEdges: make(map[string][]string),       // 空控制边映射
-		branches:     make(map[string][]*GraphBranch), // 空分支映射
-
-		// 类型验证和映射
+		nodes:        make(map[string]*graphNode),
+		dataEdges:    make(map[string][]string),
+		controlEdges: make(map[string][]string),
+		branches:     make(map[string][]*GraphBranch),
 		toValidateMap: make(map[string][]struct {
 			endNode  string
 			mappings []*FieldMapping
-		}), // 空验证映射表
-
-		// 类型系统
-		expectedInputType:  cfg.inputType,  // 设置预期输入类型
-		expectedOutputType: cfg.outputType, // 设置预期输出类型
-		genericHelper:      cfg.gh,         // 设置通用辅助系统
-
-		// 字段映射
-		fieldMappingRecords: make(map[string][]*FieldMapping), // 空字段映射记录
-
-		// 错误和状态
-		cmp: cfg.cmp, // 设置组件类型
-
-		// 状态管理
-		stateType:      cfg.stateType,      // 设置状态类型
-		stateGenerator: cfg.stateGenerator, // 设置状态生成器
-		newOpts:        cfg.newOpts,        // 设置图选项
-
-		// 处理器映射
-		handlerOnEdges:   make(map[string]map[string][]handlerPair), // 边上处理器
-		handlerPreNode:   make(map[string][]handlerPair),            // 节点前置处理器
-		handlerPreBranch: make(map[string][][]handlerPair),          // 分支前置处理器
+		}),
+		expectedInputType:   cfg.inputType,
+		expectedOutputType:  cfg.outputType,
+		genericHelper:       cfg.gh,
+		fieldMappingRecords: make(map[string][]*FieldMapping),
+		cmp:                 cfg.cmp,
+		stateType:           cfg.stateType,
+		stateGenerator:      cfg.stateGenerator,
+		newOpts:             cfg.newOpts,
+		handlerOnEdges:      make(map[string]map[string][]handlerPair),
+		handlerPreNode:      make(map[string][]handlerPair),
+		handlerPreBranch:    make(map[string][][]handlerPair),
 	}
 }
-
-// component 获取图的组件类型标识 - 返回Graph/Chain/Workflow等类型
 func (g *graph) component() component {
 	return g.cmp
 }
 
-// isChain 检查组件是否为Chain类型
 func isChain(cmp component) bool {
 	return cmp == ComponentOfChain
 }
 
-// isWorkflow 检查组件是否为Workflow类型
 func isWorkflow(cmp component) bool {
 	return cmp == ComponentOfWorkflow
 }
 
-// ErrGraphCompiled 图编译完成后禁止修改错误 - 尝试修改已编译的图时返回
+// ErrGraphCompiled 图编译完成后禁止修改的错误。
 var ErrGraphCompiled = errors.New("graph has been compiled, cannot be modified")
 
-// addNode 向图中添加节点 - 执行节点添加的核心逻辑和验证检查
 func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) (err error) {
 	if g.buildError != nil {
 		return g.buildError
@@ -305,57 +208,24 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 	return nil
 }
 
-// ========== 核心执行抽象：边添加方法 ==========
-
-// addEdgeWithMappings 是图构建的核心方法，用于在节点间添加边并处理类型映射。
-// 设计意图：建立节点间的连接关系，支持控制边和数据边两种类型的边，并自动处理类型验证和映射。
-// 参数：
-//   - startNode: 起始节点键，边的起点
-//   - endNode: 终止节点键，边的终点
-//   - noControl: 是否禁用控制边（仅数据边）
-//   - noData: 是否禁用数据边（仅控制边）
-//   - mappings: 字段映射列表，用于结构体级别的数据转换
-//
-// 返回：
-//   - error: 边添加过程中的错误，包括节点不存在、边重复、类型不匹配等
-//
-// 处理流程：
-//  1. 预检查：验证图编译状态和输入参数合法性
-//  2. 节点存在性检查：确保起始和终止节点都已添加到图中
-//  3. 控制边处理：添加执行依赖关系，更新 startNodes/endNodes
-//  4. 数据边处理：添加数据传递关系，启动类型推断验证
-//  5. 字段映射：支持结构体级别的数据转换和验证
-//
-// 关键特性：
-//   - START/END 虚拟节点：自动处理图的入口和出口
-//   - 去重检查：防止重复添加相同的边
-//   - 类型推断：自动推断节点的输入输出类型
-//   - 字段映射：支持灵活的字段级数据映射
-//   - 错误传播：累积构建过程中的所有错误
 func (g *graph) addEdgeWithMappings(startNode, endNode string, noControl bool, noData bool, mappings ...*FieldMapping) (err error) {
-	// 错误传播：如果之前有构建错误，直接返回
 	if g.buildError != nil {
 		return g.buildError
 	}
-	// 检查图是否已编译，编译后的图不能修改
 	if g.compiled {
 		return ErrGraphCompiled
 	}
 
-	// 参数验证：边不能同时禁用控制和数据依赖
 	if noControl && noData {
 		return fmt.Errorf("edge[%s]-[%s] cannot be both noDirectDependency and noDataFlow", startNode, endNode)
 	}
 
-	// 错误累积：将当前错误加入构建错误
 	defer func() {
 		if err != nil {
 			g.buildError = err
 		}
 	}()
 
-	// ========== 步骤1: 虚拟节点验证 ==========
-	// 验证 START/END 虚拟节点的正确使用
 	if startNode == END {
 		return errors.New("END cannot be a start node")
 	}
@@ -363,8 +233,6 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, noControl bool, n
 		return errors.New("START cannot be an end node")
 	}
 
-	// ========== 步骤2: 节点存在性检查 ==========
-	// 确保起始和终止节点都已添加到图中
 	if _, ok := g.nodes[startNode]; !ok && startNode != START {
 		return fmt.Errorf("edge start node '%s' needs to be added to graph first", startNode)
 	}
@@ -372,10 +240,7 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, noControl bool, n
 		return fmt.Errorf("edge end node '%s' needs to be added to graph first", endNode)
 	}
 
-	// ========== 步骤3: 控制边处理 ==========
-	// 添加执行依赖关系，但不在节点间传递数据
 	if !noControl {
-		// 检查控制边是否已存在（去重）
 		for i := range g.controlEdges[startNode] {
 			if g.controlEdges[startNode][i] == endNode {
 				return fmt.Errorf("control edge[%s]-[%s] have been added yet", startNode, endNode)
@@ -463,109 +328,90 @@ func (g *graph) AddChatModelNode(key string, node model.BaseChatModel, opts ...G
 }
 
 // AddChatTemplateNode 添加聊天模板节点到图中。
-// 设计意图：将聊天模板组件封装为图节点，支持结构化消息构建和参数化提示词
 func (g *graph) AddChatTemplateNode(key string, node prompt.ChatTemplate, opts ...GraphAddNodeOpt) error {
 	gNode, options := toChatTemplateNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 
 // AddToolsNode 添加工具节点到图中。
-// 设计意图：将工具节点组件封装为图节点，支持在图结构中动态管理工具集合
 func (g *graph) AddToolsNode(key string, node *ToolsNode, opts ...GraphAddNodeOpt) error {
 	gNode, options := toToolsNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 
 // AddDocumentTransformerNode 添加文档转换器节点到图中。
-// 设计意图：将文档转换器组件封装为图节点，支持在图结构中处理文档格式转换
 func (g *graph) AddDocumentTransformerNode(key string, node document.Transformer, opts ...GraphAddNodeOpt) error {
 	gNode, options := toDocumentTransformerNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 
 // AddLambdaNode 添加 Lambda 节点到图中。
-// 设计意图：将 Lambda 函数封装为图节点，支持四种执行模式的灵活组合
 func (g *graph) AddLambdaNode(key string, node *Lambda, opts ...GraphAddNodeOpt) error {
 	gNode, options := toLambdaNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 
 // AddGraphNode 添加子图节点到图中。
-// 设计意图：将子图（Graph/Chain/StateChain）封装为节点，支持图的嵌套组合和模块化设计
 func (g *graph) AddGraphNode(key string, node AnyGraph, opts ...GraphAddNodeOpt) error {
 	gNode, options := toAnyGraphNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 
 // AddPassthroughNode 添加透传节点到图中。
-// 设计意图：将透传节点封装为图节点，用于在图中传递数据而不进行任何处理
 func (g *graph) AddPassthroughNode(key string, opts ...GraphAddNodeOpt) error {
 	gNode, options := toPassthroughNode(opts...)
 	return g.addNode(key, gNode, options)
 }
 
 // AddBranch 添加分支到图中。
-// 设计意图：为图添加条件执行分支，支持基于条件的动态路径选择
 func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
 	return g.addBranch(startNode, branch, false)
 }
 
-// addBranch 向图中添加分支 - 执行分支添加的核心逻辑和类型检查
 func (g *graph) addBranch(startNode string, branch *GraphBranch, skipData bool) (err error) {
-	// 错误传播：如果之前有构建错误，直接返回
 	if g.buildError != nil {
 		return g.buildError
 	}
 
-	// 检查图是否已编译，编译后的图不能修改
 	if g.compiled {
 		return ErrGraphCompiled
 	}
 
-	// 错误累积：将当前错误加入构建错误
 	defer func() {
 		if err != nil {
 			g.buildError = err
 		}
 	}()
 
-	// 验证 START/END 虚拟节点的正确使用
 	if startNode == END {
 		return errors.New("END cannot be a start node")
 	}
 
-	// 确保起始节点已添加到图中
 	if _, ok := g.nodes[startNode]; !ok && startNode != START {
 		return fmt.Errorf("branch start node '%s' needs to be added to graph first", startNode)
 	}
 
-	// 初始化分支前置处理器映射
 	if _, ok := g.handlerPreBranch[startNode]; !ok {
 		g.handlerPreBranch[startNode] = [][]handlerPair{}
 	}
 	branch.idx = len(g.handlerPreBranch[startNode])
 
-	// 透传节点类型推断：如果起始节点是透传节点，更新其类型
 	if startNode != START && g.nodes[startNode].executorMeta.component == ComponentOfPassthrough {
 		g.nodes[startNode].cr.inputType = branch.inputType
 		g.nodes[startNode].cr.outputType = branch.inputType
 		g.nodes[startNode].cr.genericHelper = branch.genericHelper.forPredecessorPassthrough()
 	}
 
-	// 分支条件类型检查：验证起始节点输出类型与分支输入类型的兼容性
 	result := checkAssignable(g.getNodeOutputType(startNode), branch.inputType)
 	if result == assignableTypeMustNot {
 		return fmt.Errorf("condition's input type[%s] and start node[%s]'s output type[%s] are mismatched", branch.inputType.String(), startNode, g.getNodeOutputType(startNode).String())
 	} else if result == assignableTypeMay {
-		// 类型可能兼容，添加运行时转换处理器
 		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{branch.inputConverter})
 	} else {
-		// 类型完全兼容，无需额外处理器
 		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{})
 	}
 
 	if !skipData {
-		// 数据流处理：验证每个分支结束节点，更新类型推断和节点列表
 		for endNode := range branch.endNodes {
 			if _, ok := g.nodes[endNode]; !ok {
 				if endNode != END {
@@ -642,85 +488,56 @@ func (g *graph) updateToValidateMap() error {
 	// ========== 固定点迭代循环 ==========
 	// 持续迭代直到没有更多类型信息可以推断
 	for {
-		hasChanged := false // 标记本轮是否有类型更新
-		// 遍历所有待验证的起始节点
+		hasChanged := false
 		for startNode := range g.toValidateMap {
-			// 获取起始节点的输出类型
 			startNodeOutputType = g.getNodeOutputType(startNode)
 
-			// 遍历该起始节点的所有终止节点
 			for i := 0; i < len(g.toValidateMap[startNode]); i++ {
 				endNode := g.toValidateMap[startNode][i]
 
-				// 获取终止节点的输入类型
 				endNodeInputType = g.getNodeInputType(endNode.endNode)
-				// 如果两端都未知类型，跳过等待更多信息
 				if startNodeOutputType == nil && endNodeInputType == nil {
 					continue
 				}
 
-				// ========== 从待验证映射表中移除已处理的边 ==========
-				// 将当前边从映射表中移除，准备处理
 				g.toValidateMap[startNode] = append(g.toValidateMap[startNode][:i], g.toValidateMap[startNode][i+1:]...)
-				i-- // 调整索引，补偿被移除的元素
+				i--
 
-				hasChanged = true // 标记本轮有处理
+				hasChanged = true
 
-				// ========== 步骤1: 单向类型推断 ==========
-				// 假设 START 和 END 的类型不会为空（已有明确类型）
-				// 情况1: 起始节点有类型，终止节点未知类型
 				if startNodeOutputType != nil && endNodeInputType == nil {
-					// 推断终止节点的输入输出类型（passthrough 节点输入输出相同）
 					g.nodes[endNode.endNode].cr.inputType = startNodeOutputType
 					g.nodes[endNode.endNode].cr.outputType = g.nodes[endNode.endNode].cr.inputType
-					// 更新通用辅助系统
 					g.nodes[endNode.endNode].cr.genericHelper = g.getNodeGenericHelper(startNode).forSuccessorPassthrough()
-				} else if startNodeOutputType == nil /* && endNodeInputType != nil */ {
-					// ========== 步骤2: 单向类型推断（反向） ==========
-					// 情况2: 起始节点未知类型，终止节点有类型
-					// 推断起始节点的输入输出类型（passthrough 节点输入输出相同）
+				} else if startNodeOutputType == nil {
 					g.nodes[startNode].cr.inputType = endNodeInputType
 					g.nodes[startNode].cr.outputType = g.nodes[startNode].cr.inputType
-					// 更新通用辅助系统
 					g.nodes[startNode].cr.genericHelper = g.getNodeGenericHelper(endNode.endNode).forPredecessorPassthrough()
 				} else if len(endNode.mappings) == 0 {
-					// ========== 步骤3: 双向类型验证 ==========
-					// 情况3: 两端都有类型，且没有字段映射
-					// 通用节点类型检查
 					result := checkAssignable(startNodeOutputType, endNodeInputType)
-					// 类型完全不兼容
 					if result == assignableTypeMustNot {
 						return fmt.Errorf("graph edge[%s]-[%s]: start node's output type[%s] and end node's input type[%s] mismatch",
 							startNode, endNode.endNode, startNodeOutputType.String(), endNodeInputType.String())
 					} else if result == assignableTypeMay {
-						// ========== 类型可能兼容，需要运行时检查 ==========
-						// 添加运行时类型检查边
 						if _, ok := g.handlerOnEdges[startNode]; !ok {
 							g.handlerOnEdges[startNode] = make(map[string][]handlerPair)
 						}
 						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], g.getNodeGenericHelper(endNode.endNode).inputConverter)
 					}
-					// ========== 类型完全兼容，无需额外处理 ==========
 					continue
 				}
 
-				// ========== 步骤3: 字段映射处理 ==========
-				// 情况4: 存在字段映射，需要特殊处理
 				if len(endNode.mappings) > 0 {
-					// 初始化边处理器映射
 					if _, ok := g.handlerOnEdges[startNode]; !ok {
 						g.handlerOnEdges[startNode] = make(map[string][]handlerPair)
 					}
-					// 记录字段映射到目标节点
 					g.fieldMappingRecords[endNode.endNode] = append(g.fieldMappingRecords[endNode.endNode], endNode.mappings...)
 
-					// 验证字段映射的合法性
 					checker, uncheckedSourcePaths, err := validateFieldMapping(g.getNodeOutputType(startNode), g.getNodeInputType(endNode.endNode), endNode.mappings)
 					if err != nil {
 						return err
 					}
 
-					// 创建字段映射处理器（支持同步和流式转换）
 					g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], handlerPair{
 						invoke: func(value any) (any, error) {
 							return fieldMap(endNode.mappings, false, uncheckedSourcePaths)(value)
@@ -728,24 +545,20 @@ func (g *graph) updateToValidateMap() error {
 						transform: streamFieldMap(endNode.mappings, uncheckedSourcePaths),
 					})
 
-					// 如果有额外的类型检查器，添加到处理器链
 					if checker != nil {
 						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], *checker)
 					}
 				}
 			}
 		}
-		// ========== 迭代终止条件 ==========
-		// 如果本轮没有类型更新，说明已达到固定点，可以终止
 		if !hasChanged {
 			break
 		}
 	}
 
-	return nil // 类型推断和验证成功完成
+	return nil
 }
 
-// getNodeGenericHelper 获取节点通用辅助系统 - 处理START/END虚拟节点
 func (g *graph) getNodeGenericHelper(name string) *genericHelper {
 	if name == START {
 		return g.genericHelper.forPredecessorPassthrough()
@@ -755,7 +568,6 @@ func (g *graph) getNodeGenericHelper(name string) *genericHelper {
 	return g.nodes[name].getGenericHelper()
 }
 
-// getNodeInputType 获取节点输入类型 - 处理START/END虚拟节点
 func (g *graph) getNodeInputType(name string) reflect.Type {
 	if name == START {
 		return g.inputType()
@@ -765,7 +577,6 @@ func (g *graph) getNodeInputType(name string) reflect.Type {
 	return g.nodes[name].inputType()
 }
 
-// getNodeOutputType 获取节点输出类型 - 处理START/END虚拟节点
 func (g *graph) getNodeOutputType(name string) reflect.Type {
 	if name == START {
 		return g.inputType()
@@ -1039,7 +850,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	return r.toComposableRunnable(), nil
 }
 
-// getSuccessors 获取节点的所有后继节点 - 包括数据边、控制边和分支边连接的所有节点
+// getSuccessors 获取节点的所有后继节点。
 func getSuccessors(c *chanCall) []string {
 	ret := make([]string, len(c.writeTo))
 	copy(ret, c.writeTo)
@@ -1052,12 +863,12 @@ func getSuccessors(c *chanCall) []string {
 	return ret
 }
 
-// subGraphCompileCallback 子图编译回调结构体 - 用于在子图编译完成时执行回调
+// subGraphCompileCallback 子图编译回调结构体。
 type subGraphCompileCallback struct {
 	closure func(ctx context.Context, info *GraphInfo)
 }
 
-// OnFinish 编译完成时执行回调
+// OnFinish 编译完成时执行回调。
 func (s *subGraphCompileCallback) OnFinish(ctx context.Context, info *GraphInfo) {
 	s.closure(ctx, info)
 }
@@ -1223,66 +1034,34 @@ func transferTask(script [][]string, invertedEdges map[string][]string) [][]stri
 	return script
 }
 
-// ========== 核心执行抽象：DAG 验证方法 ==========
-
-// validateDAG 使用拓扑排序算法验证 DAG 图的有效性，检测是否存在循环。
-// 设计意图：确保 DAG 模式的图结构严格无环，是静态分析模式的核心安全机制。
-// 参数：
-//   - chanSubscribeTo: 节点订阅映射，包含所有可执行节点和其连接信息
-//   - controlPredecessors: 控制前置节点映射，记录每个节点的直接前置依赖
-//
-// 返回：
-//   - error: 如果发现循环，返回详细错误信息；否则返回 nil
-//
-// 算法原理：基于 Kahn 算法（拓扑排序的改进版）
-//  1. 计算每个节点的入度（前置节点数量）
-//  2. 从入度为 0 的节点开始，逐步移除
-//  3. 检查是否有节点无法被移除（入度始终 > 0）
-//  4. 无法移除的节点即构成循环
-//
-// 关键处理：
-//   - START 节点不入度计算（虚拟起始点）
-//   - END 节点不出度计算（虚拟终止点）
-//   - 同时考虑控制边和分支边的依赖关系
-//
-// 错误信息：
-//   - 包含所有循环的路径，便于调试和修正
-//   - 格式化输出显示循环路径，如 [A->B->C->A]
+// validateDAG 使用 Kahn 算法验证 DAG 图的有效性，检测是否存在循环。
 func validateDAG(chanSubscribeTo map[string]*chanCall, controlPredecessors map[string][]string) error {
-	// ========== 步骤1: 初始化节点入度 ==========
-	// 计算每个节点的初始入度（前置依赖数量）
 	m := map[string]int{}
 	for node := range chanSubscribeTo {
 		if edges, ok := controlPredecessors[node]; ok {
-			m[node] = len(edges) // 设置初始入度
-			// START 节点是虚拟起始点，不计入入度
+			m[node] = len(edges)
 			for _, pre := range edges {
 				if pre == START {
 					m[node] -= 1
 				}
 			}
 		} else {
-			m[node] = 0 // 无前置依赖的节点入度为 0
+			m[node] = 0
 		}
 	}
 
-	// ========== 步骤2: Kahn 算法拓扑排序 ==========
-	// 逐步移除入度为 0 的节点，检测循环
 	hasChanged := true
 	for hasChanged {
 		hasChanged = false
 		for node := range m {
-			// 找到入度为 0 的节点（无前置依赖，可以执行）
 			if m[node] == 0 {
 				hasChanged = true
-				// 移除该节点，更新其后续节点的入度
 				for _, subNode := range chanSubscribeTo[node].controls {
 					if subNode == END {
-						continue // END 是虚拟终止点，不处理
+						continue
 					}
-					m[subNode]-- // 减少后续节点的入度
+					m[subNode]--
 				}
-				// 处理分支边
 				for _, subBranch := range chanSubscribeTo[node].writeToBranches {
 					for subNode := range subBranch.endNodes {
 						if subNode == END {
@@ -1301,20 +1080,19 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, controlPredecessors map[s
 	var loopStarts []string
 	for k, v := range m {
 		if v > 0 {
-			loopStarts = append(loopStarts, k) // 记录循环的起始节点
+			loopStarts = append(loopStarts, k)
 		}
 	}
-	// 如果发现循环，返回详细错误信息
 	if len(loopStarts) > 0 {
 		return fmt.Errorf("%w: %s", DAGInvalidLoopErr, formatLoops(findLoops(loopStarts, chanSubscribeTo)))
 	}
-	return nil // 验证通过，无循环
+	return nil
 }
 
-// DAGInvalidLoopErr DAG模式循环错误 - DAG图中发现循环时返回此错误
+// DAGInvalidLoopErr DAG 图中发现循环的错误。
 var DAGInvalidLoopErr = errors.New("DAG is invalid, has loop")
 
-// findLoops 查找循环路径 - 使用DFS算法遍历图结构检测循环
+// findLoops 使用 DFS 算法查找循环路径。
 func findLoops(startNodes []string, chanCalls map[string]*chanCall) [][]string {
 	// 构建控制后继关系图
 	controlSuccessors := map[string][]string{}
@@ -1344,7 +1122,7 @@ func findLoops(startNodes []string, chanCalls map[string]*chanCall) [][]string {
 			}
 
 			var looped bool
-			// 循环检测：检查路径中是否已存在当前后继节点
+
 			for i, node := range path {
 				if node == successor {
 					ret = append(ret, append(path[i:], successor))
@@ -1356,7 +1134,6 @@ func findLoops(startNodes []string, chanCalls map[string]*chanCall) [][]string {
 				continue
 			}
 
-			// 递归遍历：从当前后继节点继续搜索
 			ret = append(ret, dfs(append(path, successor))...)
 		}
 		return ret
@@ -1371,9 +1148,6 @@ func findLoops(startNodes []string, chanCalls map[string]*chanCall) [][]string {
 	return ret
 }
 
-// formatLoops 格式化循环路径 - 将检测到的循环转换为可读字符串表示
-// 设计意图：将DFS算法找到的循环路径数组转换为清晰的错误信息格式
-// 算法思路：遍历每个循环路径，用 "->" 连接节点，用 "[]" 包裹整个循环
 func formatLoops(loops [][]string) string {
 	sb := strings.Builder{}
 	for _, loop := range loops {
@@ -1382,7 +1156,6 @@ func formatLoops(loops [][]string) string {
 		}
 		sb.WriteString("[")
 		sb.WriteString(loop[0])
-		// 循环路径连接：用箭头连接路径中的每个节点
 		for i := 1; i < len(loop); i++ {
 			sb.WriteString("->")
 			sb.WriteString(loop[i])
@@ -1392,18 +1165,17 @@ func formatLoops(loops [][]string) string {
 	return sb.String()
 }
 
-// NewNodePath 创建节点路径对象 - 用于精确指定嵌套图中的节点位置
-// 设计意图：支持多级路径指定，如 "sub_graph_node_key", "node_key_within_sub_graph"
+// NewNodePath 创建节点路径对象，用于指定嵌套图中的节点位置。
 func NewNodePath(nodeKeyPath ...string) *NodePath {
 	return &NodePath{path: nodeKeyPath}
 }
 
-// NodePath 节点路径结构体 - 封装路径信息
+// NodePath 节点路径结构体。
 type NodePath struct {
 	path []string
 }
 
-// GetPath 获取完整路径数组 - 返回路径中的所有节点键
+// GetPath 获取完整路径数组。
 func (p *NodePath) GetPath() []string {
 	return p.path
 }

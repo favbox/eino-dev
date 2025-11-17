@@ -9,148 +9,49 @@ import (
 	"github.com/favbox/eino/schema"
 )
 
-// Runnable 是可执行对象的统一接口。
+// Runnable 可执行对象的统一接口。
+// Graph、Chain 等都可以编译为 Runnable。
 //
-// 这是 Eino 框架最核心的抽象，Graph、Chain 等都可以编译为 Runnable。
-//
-// 设计理念：
-// Runnable 统一了四种数据流模式，支持自动降级兼容。
-// 即使组件只实现了部分方法，也能自动连接其他模式。
-//
-// 示例：
-// 如果组件只实现了 Stream() 方法，你仍然可以调用 Invoke()，
-// 系统会自动将流输出转换为普通输出。
-//
-// 四种执行模式：
+// 支持四种数据流模式，可自动降级兼容：
 //  1. Invoke：同步输入 → 同步输出
 //  2. Stream：同步输入 → 流输出
 //  3. Collect：流输入 → 同步输出
 //  4. Transform：流输入 → 流输出
+//
+// 注意：组件只需实现部分方法，框架会自动补全其他模式。
 type Runnable[I, O any] interface {
 	// Invoke 同步执行模式。
-	//
-	// 类似 "ping => pong" 的直接调用模式。
-	// 输入和输出都是同步的，适合大多数场景。
 	Invoke(ctx context.Context, input I, opts ...Option) (output O, err error)
 
 	// Stream 流式输出模式。
-	//
-	// 类似 "ping => stream output"。
-	// 输入是同步的，输出是流式的，适合需要实时响应的场景。
-	//
-	// 应用场景：
-	//   - 大语言模型流式响应
-	//   - 实时数据处理
-	//   - 长文本生成
 	Stream(ctx context.Context, input I, opts ...Option) (output *schema.StreamReader[O], err error)
 
 	// Collect 流式输入模式。
-	//
-	// 类似 "stream input => pong"。
-	// 输入是流式的，输出是同步的，适合需要流式输入处理的场景。
-	//
-	// 应用场景：
-	//   - 流式数据收集
-	//   - 批处理模式
-	//   - 实时数据聚合
 	Collect(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output O, err error)
 
 	// Transform 流式转换模式。
-	//
-	// 类似 "stream input => stream output"。
-	// 输入和输出都是流式的，适合流式数据处理流水线。
-	//
-	// 应用场景：
-	//   - 流式数据转换
-	//   - 实时数据处理流水线
-	//   - 流式API组合
 	Transform(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output *schema.StreamReader[O], err error)
 }
 
-// invoke 是通用的同步调用函数类型。
-//
-// 用于将强类型的 Invoke 接口转换为通用函数，
-// 方便在 composableRunnable 中使用。
 type invoke func(ctx context.Context, input any, opts ...any) (output any, err error)
 
-// transform 是通用的流式转换函数类型。
-//
-// 用于将强类型的 Transform 接口转换为通用函数，
-// 方便在 composableRunnable 中使用。
 type transform func(ctx context.Context, input streamReader, opts ...any) (output streamReader, err error)
 
-// composableRunnable 是所有用户提供的可执行对象的包装器。
-//
-// 核心特性：
-//   - 一个实例对应一个可执行对象
-//   - 所有信息来自可执行对象本身
-//   - 无其他维度的附加信息
-//
-// 适用场景：
-//   - GraphNode（图形节点）
-//   - ChainBranch（链分支）
-//   - StatePreHandler（状态前置处理器）
-//   - StatePostHandler（状态后置处理器）
-//   - 任何用户自定义的可执行组件
 type composableRunnable struct {
-	// i 是 invoke 函数的实现。
 	i invoke
-
-	// t 是 transform 函数的实现。
 	t transform
 
-	// inputType 是输入类型。
-	inputType reflect.Type
-
-	// outputType 是输出类型。
+	inputType  reflect.Type
 	outputType reflect.Type
-
-	// optionType 是选项类型。
 	optionType reflect.Type
 
-	// genericHelper 提供泛型操作的辅助功能。
 	*genericHelper
 
-	// isPassthrough 表示是否为透传模式。
-	//
-	// 透传模式：输入直接传递给输出，不做任何处理。
 	isPassthrough bool
-
-	// meta 是执行器的元数据信息。
-	//
-	// 包含：
-	//   - 组件类型
-	//   - 回调是否启用
-	//   - 实现类型名称
-	meta *executorMeta
-
-	// nodeInfo 是节点信息，仅在 Graph 节点中可用。
-	//
-	// 如果 composableRunnable 不在 Graph 节点中，此字段为 nil。
-	//
-	// 包含：
-	//   - 节点名称
-	//   - 节点类型
-	//   - 节点配置
-	nodeInfo *nodeInfo
+	meta          *executorMeta
+	nodeInfo      *nodeInfo
 }
 
-// runnableLambda 创建可执行的 lambda 函数。
-//
-// 参数：
-//   - i：Invoke 接口实现（可选）
-//   - s：Stream 接口实现（可选）
-//   - c：Collect 接口实现（可选）
-//   - t：Transform 接口实现（可选）
-//   - enableCallback：是否启用回调
-//
-// 返回：
-//   - *composableRunnable：可执行的 Runnable 实例
-//
-// 特点：
-//   - 支持部分接口实现，自动补全其他模式
-//   - 启用回调时会自动包装回调逻辑
-//   - 类型安全，确保输入输出类型匹配
 func runnableLambda[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O, TOption], c Collect[I, O, TOption],
 	t Transform[I, O, TOption], enableCallback bool) *composableRunnable {
 	rp := newRunnablePacker(i, s, c, t, enableCallback)
@@ -158,36 +59,13 @@ func runnableLambda[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O, T
 	return rp.toComposableRunnable()
 }
 
-// runnablePacker 是 Runnable 接口的打包器。
-//
-// 用于将组件的各种接口实现打包为 composableRunnable。
-// 支持部分实现，自动补全缺失的方法。
 type runnablePacker[I, O, TOption any] struct {
-	// i 是 Invoke 接口的实现。
 	i Invoke[I, O, TOption]
-
-	// s 是 Stream 接口的实现。
 	s Stream[I, O, TOption]
-
-	// c 是 Collect 接口的实现。
 	c Collect[I, O, TOption]
-
-	// t 是 Transform 接口的实现。
 	t Transform[I, O, TOption]
 }
 
-// wrapRunnableCtx 包装上下文。
-//
-// 为所有接口实现添加上下文包装器，
-// 用于在执行前后注入额外逻辑（如超时控制、回调等）。
-//
-// 参数：
-//   - ctxWrapper：上下文包装函数
-//
-// 作用：
-//   - 在调用原始方法前应用上下文包装
-//   - 支持动态上下文修改
-//   - 统一上下文处理逻辑
 func (rp *runnablePacker[I, O, TOption]) wrapRunnableCtx(ctxWrapper func(ctx context.Context, opts ...TOption) context.Context) {
 	i, s, c, t := rp.i, rp.s, rp.c, rp.t
 	rp.i = func(ctx context.Context, input I, opts ...TOption) (output O, err error) {
@@ -209,19 +87,6 @@ func (rp *runnablePacker[I, O, TOption]) wrapRunnableCtx(ctxWrapper func(ctx con
 	}
 }
 
-// toComposableRunnable 转换为可执行的 Runnable。
-//
-// 将 runnablePacker 转换为 composableRunnable，
-// 包含类型信息和转换逻辑。
-//
-// 返回：
-//   - *composableRunnable：可执行的 Runnable 实例
-//
-// 转换过程：
-//  1. 获取输入、输出、选项的类型信息
-//  2. 创建 genericHelper 辅助实例
-//  3. 包装 Invoke 和 Transform 方法
-//  4. 处理类型转换和 nil 检查
 func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunnable {
 	inputType := generic.TypeOf[I]()
 	outputType := generic.TypeOf[O]()
@@ -379,15 +244,6 @@ func invokeByStream[I, O, TOption any](s Stream[I, O, TOption]) Invoke[I, O, TOp
 	}
 }
 
-// invokeByCollect 通过 Collect 实现 Invoke。
-//
-// 自动补全机制：将流式输入转换为同步输入。
-// 使用场景：组件只实现了 Collect，但需要 Invoke 模式。
-//
-// 转换过程：
-//  1. 将输入包装为单元素流
-//  2. 调用 Collect 方法处理流输入
-//  3. 返回处理结果
 func invokeByCollect[I, O, TOption any](c Collect[I, O, TOption]) Invoke[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output O, err error) {
 		sr := schema.StreamReaderFromArray([]I{input})
@@ -396,16 +252,6 @@ func invokeByCollect[I, O, TOption any](c Collect[I, O, TOption]) Invoke[I, O, T
 	}
 }
 
-// invokeByTransform 通过 Transform 实现 Invoke。
-//
-// 自动补全机制：将流式转换转换为同步处理。
-// 使用场景：组件只实现了 Transform，但需要 Invoke 模式。
-//
-// 转换过程：
-//  1. 将输入包装为单元素流
-//  2. 调用 Transform 方法处理流
-//  3. 将流输出转换为单值输出
-//  4. 返回结果
 func invokeByTransform[I, O, TOption any](t Transform[I, O, TOption]) Invoke[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output O, err error) {
 		srInput := schema.StreamReaderFromArray([]I{input})
@@ -419,15 +265,6 @@ func invokeByTransform[I, O, TOption any](t Transform[I, O, TOption]) Invoke[I, 
 	}
 }
 
-// streamByTransform 通过 Transform 实现 Stream。
-//
-// 自动补全机制：将流式转换转换为流式输出。
-// 使用场景：组件只实现了 Transform，但需要 Stream 模式。
-//
-// 转换过程：
-//  1. 将输入包装为单元素流
-//  2. 调用 Transform 方法处理流
-//  3. 直接返回流输出
 func streamByTransform[I, O, TOption any](t Transform[I, O, TOption]) Stream[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output *schema.StreamReader[O], err error) {
 		srInput := schema.StreamReaderFromArray([]I{input})
@@ -436,15 +273,6 @@ func streamByTransform[I, O, TOption any](t Transform[I, O, TOption]) Stream[I, 
 	}
 }
 
-// streamByInvoke 通过 Invoke 实现 Stream。
-//
-// 自动补全机制：将同步输出转换为流式输出。
-// 使用场景：组件只实现了 Invoke，但需要 Stream 模式。
-//
-// 转换过程：
-//  1. 调用 Invoke 方法获取输出
-//  2. 将单值输出包装为单元素流
-//  3. 返回流输出
 func streamByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Stream[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output *schema.StreamReader[O], err error) {
 		out, err := i(ctx, input, opts...)
@@ -456,15 +284,6 @@ func streamByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Stream[I, O, TOp
 	}
 }
 
-// streamByCollect 通过 Collect 实现 Stream。
-//
-// 自动补全机制：将流式输入转换为流式输出。
-// 使用场景：组件只实现了 Collect，但需要 Stream 模式。
-//
-// 转换过程：
-//  1. 将输入包装为单元素流
-//  2. 调用 Collect 方法处理流输入
-//  3. 将输出包装为流输出
 func streamByCollect[I, O, TOption any](c Collect[I, O, TOption]) Stream[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output *schema.StreamReader[O], err error) {
 		srInput := schema.StreamReaderFromArray([]I{input})
@@ -477,15 +296,6 @@ func streamByCollect[I, O, TOption any](c Collect[I, O, TOption]) Stream[I, O, T
 	}
 }
 
-// collectByTransform 通过 Transform 实现 Collect。
-//
-// 自动补全机制：将流式转换转换为流式输入。
-// 使用场景：组件只实现了 Transform，但需要 Collect 模式。
-//
-// 转换过程：
-//  1. 调用 Transform 方法处理流输入
-//  2. 将流输出转换为单值输出
-//  3. 返回单值
 func collectByTransform[I, O, TOption any](t Transform[I, O, TOption]) Collect[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output O, err error) {
 		srOutput, err := t(ctx, input, opts...)
@@ -497,15 +307,6 @@ func collectByTransform[I, O, TOption any](t Transform[I, O, TOption]) Collect[I
 	}
 }
 
-// collectByInvoke 通过 Invoke 实现 Collect。
-//
-// 自动补全机制：将同步处理转换为流式输入。
-// 使用场景：组件只实现了 Invoke，但需要 Collect 模式。
-//
-// 转换过程：
-//  1. 将流输入转换为单值
-//  2. 调用 Invoke 方法处理单值
-//  3. 返回输出
 func collectByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Collect[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output O, err error) {
 		in, err := defaultImplConcatStreamReader(input)
@@ -517,15 +318,6 @@ func collectByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Collect[I, O, T
 	}
 }
 
-// collectByStream 通过 Stream 实现 Collect。
-//
-// 自动补全机制：将流式输出转换为流式输入。
-// 使用场景：组件只实现了 Stream，但需要 Collect 模式。
-//
-// 转换过程：
-//  1. 将流输入转换为单值
-//  2. 调用 Stream 方法获取流输出
-//  3. 将流输出转换为单值
 func collectByStream[I, O, TOption any](s Stream[I, O, TOption]) Collect[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output O, err error) {
 		in, err := defaultImplConcatStreamReader(input)
@@ -542,15 +334,6 @@ func collectByStream[I, O, TOption any](s Stream[I, O, TOption]) Collect[I, O, T
 	}
 }
 
-// transformByStream 通过 Stream 实现 Transform。
-//
-// 自动补全机制：将流式输出转换为流式转换。
-// 使用场景：组件只实现了 Stream，但需要 Transform 模式。
-//
-// 转换过程：
-//  1. 将流输入转换为单值
-//  2. 调用 Stream 方法获取流输出
-//  3. 返回流输出
 func transformByStream[I, O, TOption any](s Stream[I, O, TOption]) Transform[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I],
 		opts ...TOption) (output *schema.StreamReader[O], err error) {
@@ -563,15 +346,6 @@ func transformByStream[I, O, TOption any](s Stream[I, O, TOption]) Transform[I, 
 	}
 }
 
-// transformByCollect 通过 Collect 实现 Transform。
-//
-// 自动补全机制：将流式输入转换为流式转换。
-// 使用场景：组件只实现了 Collect，但需要 Transform 模式。
-//
-// 转换过程：
-//  1. 调用 Collect 方法处理流输入
-//  2. 将输出包装为流输出
-//  3. 返回流输出
 func transformByCollect[I, O, TOption any](c Collect[I, O, TOption]) Transform[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I],
 		opts ...TOption) (output *schema.StreamReader[O], err error) {
@@ -584,15 +358,6 @@ func transformByCollect[I, O, TOption any](c Collect[I, O, TOption]) Transform[I
 	}
 }
 
-// transformByInvoke 通过 Invoke 实现 Transform。
-//
-// 自动补全机制：将同步处理转换为流式转换。
-// 使用场景：组件只实现了 Invoke，但需要 Transform 模式。
-//
-// 转换过程：
-//  1. 将流输入转换为单值
-//  2. 调用 Invoke 方法处理单值
-//  3. 将输出包装为流输出
 func transformByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Transform[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I],
 		opts ...TOption) (output *schema.StreamReader[O], err error) {
@@ -844,13 +609,6 @@ func outputKeyedComposableRunnable(key string, r *composableRunnable) *composabl
 	return &wrapper
 }
 
-// composablePassthrough 创建透传模式的 Runnable。
-//
-// 这是一个特殊的 Runnable，输入直接传递给输出，不做任何处理。
-// 用于数据流的直接传输或延迟处理场景。
-//
-// 返回：
-//   - *composableRunnable：透传模式的 Runnable 实例
 func composablePassthrough() *composableRunnable {
 	r := &composableRunnable{isPassthrough: true, nodeInfo: &nodeInfo{}}
 

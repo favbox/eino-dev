@@ -5,7 +5,7 @@ import (
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
-// DataType - 工具参数的数据类型，遵循 OpenAPI 3.0 规范
+// DataType - 工具参数的数据类型，遵循 JSONSchema 规范
 type DataType string
 
 const (

@@ -817,7 +817,7 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 		}
 
 		t, err := srw.convert(out)
-		if err != nil {
+		if err == nil {
 			return t, err
 		}
 

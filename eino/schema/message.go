@@ -20,576 +20,13 @@ import (
 	"github.com/favbox/eino/internal/generic"
 )
 
-// === Layer 1: 基础定义层 (被依赖的基础) ===
-// 1.1 核心枚举和常量
-
-// RoleType 表示消息角色类型。
-type RoleType string
-
-const (
-	Assistant RoleType = "assistant" // 助手角色，ChatModel 返回的消息
-	User      RoleType = "user"      // 用户角色，用户发送的消息
-	System    RoleType = "system"    // 系统角色，系统消息
-	Tool      RoleType = "tool"      // 工具角色，工具调用输出
-)
-
-// FormatType 消息模板格式类型
-type FormatType uint8
-
-const (
-	// FString Python pyfmt 格式，支持 PEP-3101 格式化
-	FString FormatType = 0
-	// Jinja2 Python Jinja2 模板引擎格式
-	Jinja2 FormatType = 2
-	// GoTemplate Go 标准库 text/template 格式
-	GoTemplate FormatType = 1
-)
-
-// ImageURLDetail 表示图片 URL 的质量级别。
-type ImageURLDetail string
-
-const (
-	ImageURLDetailHigh ImageURLDetail = "high" // 高质量
-	ImageURLDetailLow  ImageURLDetail = "low"  // 低质量
-	ImageURLDetailAuto ImageURLDetail = "auto" // 自动质量
-)
-
-// ChatMessagePartType 表示聊天消息部分的类型，用于多模态消息处理。
-type ChatMessagePartType string
-
-const (
-	ChatMessagePartTypeText     ChatMessagePartType = "text"      // 文本类型
-	ChatMessagePartTypeImageURL ChatMessagePartType = "image_url" // 图片URL类型
-	ChatMessagePartTypeAudioURL ChatMessagePartType = "audio_url" // 音频URL类型
-	ChatMessagePartTypeVideoURL ChatMessagePartType = "video_url" // 视频URL类型
-	ChatMessagePartTypeFileURL  ChatMessagePartType = "file_url"  // 文件URL类型
-)
-
-// 1.2 核心接口定义
-
-// MessagesTemplate 消息模板接口，将模板渲染为消息列表
-//
-// 示例: 使用占位符引用历史消息
-//
-//	chatTemplate := prompt.FromMessages(
-//	    Schema.SystemMessage("你是一个AI助手"),
-//	    Schema.MessagesPlaceholder("history", false), // 使用参数中的"history"值
-//	)
-//	msgs, err := chatTemplate.Format(ctx, params)
-type MessagesTemplate interface {
-	Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error)
+func init() {
+	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
+	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
 }
 
-// === Layer 2: 核心类型定义层 ===
-
-// 2.1 核心消息结构体 (用户最关心的类型)
-
-// Message 表示聊天消息。
-type Message struct {
-	Role RoleType `json:"role"`
-
-	// Content 用于用户文本输入和模型文本输出。
-	Content string `json:"content"`
-
-	// UserInputMultiContent 传递用户提供的多模态内容给模型。
-	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
-
-	// AssistantGenMultiContent 用于接收模型的多模态输出。
-	AssistantGenMultiContent []MessageOutputPart `json:"assistant_output_multi_content,omitempty"`
-
-	Name string `json:"name,omitempty"`
-
-	// 仅用于 AssistantMessage
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-
-	// 仅用于 ToolMessage
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	// 仅用于 ToolMessage
-	ToolName string `json:"tool_name,omitempty"`
-
-	ResponseMeta *ResponseMeta `json:"response_meta,omitempty"`
-
-	// ReasoningContent 模型的思考过程。
-	// 模型返回推理内容：包含该字段；其他情况：省略该字段
-	ReasoningContent string `json:"reasoning_content,omitempty"`
-
-	// Extra 模型实现的定制信息
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// 2.2 工具调用相关结构体
-
-// ToolCall 表示消息中的工具调用。 用于助手消息中需要执行工具调用的场景。
-type ToolCall struct {
-	// Index 多个工具调用时的标识符
-	// 流式模式下用于标识和合并工具调用块
-	Index *int `json:"index,omitempty"`
-
-	// ID 工具调用的唯一标识
-	ID string `json:"id"`
-
-	// Type 工具调用类型，默认为"function"
-	Type string `json:"type"`
-
-	// Function 要执行的函数调用
-	Function FunctionCall `json:"function"`
-
-	// Extra 工具调用的额外信息
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// FunctionCall 表示消息中的函数调用。用于助手消息中。
-type FunctionCall struct {
-	//  Name 要调用的函数名称
-	Name string `json:"name,omitempty"`
-
-	// Arguments 调用函数的参数，JSON 格式
-	Arguments string `json:"arguments,omitempty"`
-}
-
-// 2.3 响应元数据结构体
-
-// ResponseMeta 收集聊天响应的元信息。
-type ResponseMeta struct {
-	// FinishReason 聊天响应结束的原因
-	// 通常为"stop"、"length"、"tool_calls"、"content_filter"、"null"，由聊天模型实现定义
-	FinishReason string `json:"finish_reason,omitempty"`
-
-	// Usage 聊天响应的 Token 使用量，取决于聊天模型实现是否返回
-	Usage *TokenUsage `json:"usage,omitempty"`
-
-	// LogProbs 对数概率信息
-	LogProbs *LogProbs `json:"log_probs,omitempty"`
-}
-
-// 2.4 Token使用相关结构体
-
-// TokenUsage 表示聊天模型请求的 Token 使用量。
-type TokenUsage struct {
-	// PromptTokens 提示词 Token 数量，包含该请求的所有输入 Token
-	PromptTokens int `json:"prompt_tokens"`
-
-	// PromptTokenDetails 提示词 Token 的详细分解
-	PromptTokenDetails PromptTokenDetails `json:"prompt_token_details"`
-
-	// Completion 完成 Token 数量
-	CompletionTokens int `json:"completion_tokens"`
-
-	// TotalTokens Token 总数量
-	TotalTokens int `json:"total_tokens"`
-}
-
-// PromptTokenDetails 表示提示词Token的详细信息。
-type PromptTokenDetails struct {
-	// CachedTokens 提示词中的缓存Token数量
-	CachedTokens int `json:"cached_tokens"`
-}
-
-// 2.5 辅助配置结构体
-
-// toolMessageOptions - 工具消息的可选配置项。
-type toolMessageOptions struct {
-	toolName string // 工具名称
-}
-
-// 2.6 函数选项类型定义
-
-// ToolMessageOption - 工具消息配置选项函数类型。
-type ToolMessageOption func(*toolMessageOptions)
-
-// 2.7 消息部分结构体
-
-// MessagePartCommon 表示多模态类型的输入/输出的通用消息组件。
-type MessagePartCommon struct {
-	// URL 传统 URL 或RFC-2379格式的特殊 URL
-	URL *string `json:"url,omitempty"`
-
-	// Base64Data Base64编码的二进制数据
-	Base64Data *string `json:"base64_data,omitempty"`
-
-	// MIMEType MIME 类型，如"image/png"、"audio/wav"等
-	MIMEType string `json:"mime_type,omitempty"`
-
-	// Extra 存储额外信息
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// MessageInputImage 表示消息中的图片输入部分。
-// URL 和 Base64Data 选择其一使用。
-type MessageInputImage struct {
-	MessagePartCommon
-
-	// Detail 图片质量级别
-	Detail ImageURLDetail `json:"detail,omitempty"`
-}
-
-// MessageInputAudio 表示消息中的音频输入部分。
-// URL 和 Base64Data 选择其一使用。
-type MessageInputAudio struct {
-	MessagePartCommon
-}
-
-// MessageInputVideo 表示消息中的视频输入部分。
-// URL 和 Base64Data 选择其一使用。
-type MessageInputVideo struct {
-	MessagePartCommon
-}
-
-// MessageInputFile 表示消息中的文件输入部分。
-// URL 和 Base64Data 选择其一使用。
-type MessageInputFile struct {
-	MessagePartCommon
-}
-
-// MessageInputPart 表示消息的输入部分。
-type MessageInputPart struct {
-	Type ChatMessagePartType `json:"type"`
-
-	Text string `json:"text,omitempty"`
-
-	// Image 图片输入，Type 为 "image_url" 时使用
-	Image *MessageInputImage `json:"image,omitempty"`
-
-	// Audio 音频输入，Type 为 "audio_url" 时使用
-	Audio *MessageInputAudio `json:"audio,omitempty"`
-
-	// Video 视频输入，Type 为 "video_url" 时使用
-	Video *MessageInputVideo `json:"video,omitempty"`
-
-	// File 视频输入，Type 为 "file_url" 时使用
-	File *MessageInputFile `json:"file,omitempty"`
-}
-
-// MessageOutputImage 表示消息中的图片输出部分。
-type MessageOutputImage struct {
-	MessagePartCommon
-}
-
-// MessageOutputAudio 表示消息中的音频输出部分。
-type MessageOutputAudio struct {
-	MessagePartCommon
-}
-
-// MessageOutputVideo 表示消息中的视频输出部分。
-type MessageOutputVideo struct {
-	MessagePartCommon
-}
-
-// MessageOutputPart 表示助手生成消息的部分。
-// 可包含文本或多媒体内容（图片、音频、视频）。
-type MessageOutputPart struct {
-	// Type 部分类型，如"text"、"image_url"、"audio_url"、"video_url"
-	Type ChatMessagePartType `json:"type"`
-
-	// Text 部分文本，Type为"text"时使用
-	Text string `json:"text,omitempty"`
-
-	// Image 图片输出，Type为ChatMessagePartTypeImageURL时使用
-	Image *MessageOutputImage `json:"image,omitempty"`
-
-	// Audio 音频输出，Type为ChatMessagePartTypeAudioURL时使用
-	Audio *MessageOutputAudio `json:"audio,omitempty"`
-
-	// Video 视频输出，Type为ChatMessagePartTypeVideoURL时使用
-	Video *MessageOutputVideo `json:"video,omitempty"`
-}
-
-// 2.7 日志相关结构体
-
-// LogProbs 包含对数概率信息的顶级结构。
-type LogProbs struct {
-	// Content 带有对数概率信息的消息内容 Token 列表
-	Content []LogProb `json:"content"`
-}
-
-// LogProb 表示 Token 的概率信息。
-type LogProb struct {
-	// Token 文本，表示语言模型分词过程中的连续字符序列
-	Token string `json:"token"`
-
-	// LogProb Token 的对数概率
-	// 前 20个最可能 Token：显示实际概率值；其他 Token：-9999.0
-	LogProb float64 `json:"logprob"`
-
-	// Bytes Token 的 UTF-8字节表示，整数列表
-	// 多 Token 表示一字符：需要合并字节；无字节表示：null 省略
-	Bytes []int64 `json:"bytes,omitempty"`
-
-	// TopLogProbs 该 Token 位置最可能的 Token 列表
-	// 正常情况：返回请求的数量；少数情况：返回数量少于请求
-	TopLogProbs []TopLogProb `json:"top_logprobs"`
-}
-
-// TopLogProb 表示最可能Token 的概率信息。
-type TopLogProb struct {
-	// Token 文本，表示语言模型分词过程中的连续字符序列
-	Token string `json:"token"`
-
-	// LogProb Token 的对数概率
-	// 前 20个最可能 Token：显示实际概率值；其他 Token：-9999.0
-	LogProb float64 `json:"logprob"`
-
-	// Bytes Token 的 UTF-8字节表示，整数列表
-	// 多 Token 表示一字符：需要合并字节；无字节表示：null 省略
-	Bytes []int64 `json:"bytes,omitempty"`
-}
-
-// 2.8 模板相关结构体
-
-type messagesPlaceholder struct {
-	key      string
-	optional bool
-}
-
-// === Layer 3: 公开API层 (用户最常用的功能) ===
-
-// 3.1 消息构造函数
-
-// SystemMessage 创建系统角色的消息
-func SystemMessage(content string) *Message {
-	return &Message{
-		Role:    System,
-		Content: content,
-	}
-}
-
-// AssistantMessage 创建助手角色的消息，支持工具调用
-func AssistantMessage(content string, toolCalls []ToolCall) *Message {
-	return &Message{
-		Role:      Assistant,
-		Content:   content,
-		ToolCalls: toolCalls,
-	}
-}
-
-// UserMessage 创建用户角色的消息
-func UserMessage(content string) *Message {
-	return &Message{
-		Role:    User,
-		Content: content,
-	}
-}
-
-// ToolMessage - 创建工具角色消息，支持可选配置。
-func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *Message {
-	o := &toolMessageOptions{}
-	for _, opt := range opts {
-		opt(o)
-	}
-	return &Message{
-		Role:       Tool,
-		Content:    content,
-		ToolCallID: toolCallID,
-		ToolName:   o.toolName,
-	}
-}
-
-// WithToolName - 设置工具消息的工具名称选项。
-func WithToolName(name string) ToolMessageOption {
-	return func(o *toolMessageOptions) {
-		o.toolName = name
-	}
-}
-
-// 3.2 消息合并函数
-
-// ConcatMessages 合并相同角色和名称的消息。
-// 合并相同索引的工具调用，不同角色或名称的消息会返回错误。
-// 用于合并流式消息。
-//
-// 示例:
-//
-//	msgs := []*Message{}
-//	for {
-//		msg, err := stream.Recv()
-//		if errors.Is(err, io.EOF) {
-//			break
-//	    }
-//	    if err != nil {...}
-//	    msgs = append(msgs, msg)
-//	}
-//
-// merged, err := ConcatMessages(msgs) // merged.Content 将包含所有消息的完整内容
-func ConcatMessages(msgs []*Message) (*Message, error) {
-	var (
-		contents                      []string
-		contentLen                    int
-		reasoningContents             []string
-		reasoningContentLen           int
-		toolCalls                     []ToolCall
-		assistantGenMultiContentParts []MessageOutputPart
-		ret                           = Message{}
-		extraList                     = make([]map[string]any, 0, len(msgs))
-	)
-
-	for idx, msg := range msgs {
-		if msg == nil {
-			return nil, fmt.Errorf("消息流中出现了意外的nil块，索引：%d", idx)
-		}
-
-		// 角色校验
-		if msg.Role != "" {
-			if ret.Role == "" {
-				ret.Role = msg.Role
-			} else if ret.Role != msg.Role {
-				return nil, fmt.Errorf("无法连接不同角色的消息：%s %s", ret.Role, msg.Role)
-			}
-		}
-
-		// 名称校验
-		if msg.Name != "" {
-			if ret.Name == "" {
-				ret.Name = msg.Name
-			} else if ret.Name != msg.Name {
-				return nil, fmt.Errorf("无法连接不同名称的消息：%s %s", ret.Name, msg.Name)
-			}
-		}
-
-		// 工具调用ID校验
-		if msg.ToolCallID != "" {
-			if ret.ToolCallID == "" {
-				ret.ToolCallID = msg.ToolCallID
-			} else if ret.ToolCallID != msg.ToolCallID {
-				return nil, fmt.Errorf("无法连接不同工具调用ID的消息：%s %s", ret.ToolCallID, msg.ToolCallID)
-			}
-		}
-		// 工具调用名称校验
-		if msg.ToolName != "" {
-			if ret.ToolName == "" {
-				ret.ToolName = msg.ToolName
-			} else if ret.ToolName != msg.ToolName {
-				return nil, fmt.Errorf("无法连接不同工具调用名称的消息：%s %s", ret.ToolName, msg.ToolName)
-			}
-		}
-
-		// 收集内容
-		if msg.Content != "" {
-			contents = append(contents, msg.Content)
-			contentLen += len(msg.Content)
-		}
-
-		// 收集推理内容
-		if msg.ReasoningContent != "" {
-			reasoningContents = append(reasoningContents, msg.ReasoningContent)
-			reasoningContentLen += len(msg.ReasoningContent)
-		}
-
-		// 收集工具调用
-		if len(msg.ToolCalls) > 0 {
-			toolCalls = append(toolCalls, msg.ToolCalls...)
-		}
-
-		// 收集额外信息
-		if len(msg.Extra) > 0 {
-			extraList = append(extraList, msg.Extra)
-		}
-
-		if len(msg.AssistantGenMultiContent) > 0 {
-			assistantGenMultiContentParts = append(assistantGenMultiContentParts, msg.AssistantGenMultiContent...)
-		}
-
-		if msg.ResponseMeta != nil && ret.ResponseMeta == nil {
-			ret.ResponseMeta = &ResponseMeta{}
-		}
-		if msg.ResponseMeta != nil && ret.ResponseMeta != nil {
-			// 保留最后一个有效的 FinishReason 值
-			if msg.ResponseMeta.FinishReason != "" {
-				ret.ResponseMeta.FinishReason = msg.ResponseMeta.FinishReason
-			}
-
-			if msg.ResponseMeta.Usage != nil {
-				if ret.ResponseMeta.Usage == nil {
-					ret.ResponseMeta.Usage = &TokenUsage{}
-				}
-
-				if msg.ResponseMeta.Usage.PromptTokens > ret.ResponseMeta.Usage.PromptTokens {
-					ret.ResponseMeta.Usage.PromptTokens = msg.ResponseMeta.Usage.PromptTokens
-				}
-				if msg.ResponseMeta.Usage.CompletionTokens > ret.ResponseMeta.Usage.CompletionTokens {
-					ret.ResponseMeta.Usage.CompletionTokens = msg.ResponseMeta.Usage.CompletionTokens
-				}
-
-				if msg.ResponseMeta.Usage.TotalTokens > ret.ResponseMeta.Usage.TotalTokens {
-					ret.ResponseMeta.Usage.TotalTokens = msg.ResponseMeta.Usage.TotalTokens
-				}
-
-				if msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens {
-					ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens
-				}
-			}
-
-			if msg.ResponseMeta.LogProbs != nil {
-				if ret.ResponseMeta.LogProbs == nil {
-					ret.ResponseMeta.LogProbs = &LogProbs{}
-				}
-
-				ret.ResponseMeta.LogProbs.Content = append(ret.ResponseMeta.LogProbs.Content, msg.ResponseMeta.LogProbs.Content...)
-			}
-
-		}
-	}
-
-	// 合并文本内容
-	if len(contents) > 0 {
-		var sb strings.Builder
-		sb.Grow(contentLen)
-		for _, content := range contents {
-			_, err := sb.WriteString(content)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		ret.Content = sb.String()
-	}
-
-	// 合并推理内容
-	if len(reasoningContents) > 0 {
-		var sb strings.Builder
-		sb.Grow(reasoningContentLen)
-		for _, content := range reasoningContents {
-			_, err := sb.WriteString(content)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		ret.ReasoningContent = sb.String()
-	}
-
-	// 合并工具调用
-	if len(toolCalls) > 0 {
-		merged, err := concatToolCalls(toolCalls)
-		if err != nil {
-			return nil, err
-		}
-
-		ret.ToolCalls = merged
-	}
-
-	if len(extraList) > 0 {
-		extra, err := concatExtra(extraList)
-		if err != nil {
-			return nil, fmt.Errorf("连接消息的额外部分失败: %w", err)
-		}
-
-		if len(extra) > 0 {
-			ret.Extra = extra
-		}
-	}
-
-	if len(assistantGenMultiContentParts) > 0 {
-		merged, err := concatAssistantMultiContent(assistantGenMultiContentParts)
-		if err != nil {
-			return nil, fmt.Errorf("合并助手生成的多个内容失败: %w", err)
-		}
-		ret.AssistantGenMultiContent = merged
-	}
-
-	return &ret, nil
-}
-
-// ConcatMessageArray - 按位置合并多个消息数组，支持空消息和长度校验。
+// ConcatMessageArray 合并消息数组的数组。
+// 要求所有子数组长度相同，按位置合并消息。
 func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
 	arrayLen := len(mas[0])
 
@@ -628,50 +65,458 @@ func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
 	return ret, nil
 }
 
-// ConcatMessageStream 读取并合并消息流中的所有消息。
-// 自动关闭流，返回合并后的完整消息。
-func ConcatMessageStream(s *StreamReader[*Message]) (*Message, error) {
-	defer s.Close()
+// FormatType 消息模板的格式化类型。
+type FormatType uint8
 
-	var msgs []*Message
-	for {
-		msg, err := s.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
+const (
+	// FString Python 风格的字符串格式化 (PEP-3101)。
+	// 由 pyfmt 库实现。
+	FString FormatType = 0
+	// GoTemplate Go 标准库的 text/template 格式化。
+	GoTemplate FormatType = 1
+	// Jinja2 Jinja2 模板格式化。
+	// 由 gonja 库实现。
+	Jinja2 FormatType = 2
+)
 
-		msgs = append(msgs, msg)
-	}
+// RoleType 消息角色类型。
+type RoleType string
 
-	return ConcatMessages(msgs)
+const (
+	// Assistant 助手角色，表示消息由聊天模型返回。
+	Assistant RoleType = "assistant"
+	// User 用户角色，表示消息来自用户输入。
+	User RoleType = "user"
+	// System 系统角色，表示消息为系统消息。
+	System RoleType = "system"
+	// Tool 工具角色，表示消息为工具调用输出。
+	Tool RoleType = "tool"
+)
+
+// FunctionCall 消息中的函数调用信息。
+// 用于 Assistant 消息中的工具调用。
+type FunctionCall struct {
+	// Name 函数名称，用于标识具体的函数。
+	Name string `json:"name,omitempty"`
+	// Arguments 函数参数，JSON 格式字符串。
+	Arguments string `json:"arguments,omitempty"`
 }
 
-// 3.3 模板相关函数
+// ToolCall 消息中的工具调用信息。
+// 用于 Assistant 消息中需要调用工具的场景。
+type ToolCall struct {
+	// Index 工具调用索引，用于多工具调用场景。
+	// 流式模式下用于标识分块以便合并。
+	Index *int `json:"index,omitempty"`
+	// ID 工具调用的唯一标识符。
+	ID string `json:"id"`
+	// Type 工具调用类型。
+	// 默认值："function"。
+	Type string `json:"type"`
+	// Function 要调用的函数信息。
+	Function FunctionCall `json:"function"`
 
-// MessagesPlaceholder - 创建消息占位符模板，用于渲染时替换参数中的消息列表。
+	// Extra 额外信息存储。
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ImageURLDetail 图像 URL 的质量级别。
+type ImageURLDetail string
+
+const (
+	// ImageURLDetailHigh 高质量图像。
+	ImageURLDetailHigh ImageURLDetail = "high"
+	// ImageURLDetailLow 低质量图像。
+	ImageURLDetailLow ImageURLDetail = "low"
+	// ImageURLDetailAuto 自动选择质量。
+	ImageURLDetailAuto ImageURLDetail = "auto"
+)
+
+// MessagePartCommon 多模态类型的通用抽象组件。
+// 用于输入和输出的统一表示。
+type MessagePartCommon struct {
+	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
+	// 具体使用方式请参考模型实现的文档。
+	URL *string `json:"url,omitempty"`
+
+	// Base64Data Base64 编码的二进制数据。
+	Base64Data *string `json:"base64data,omitempty"`
+
+	// MIMEType MIME 类型，例如 "image/png"、"audio/wav"。
+	MIMEType string `json:"mime_type,omitempty"`
+
+	// Extra 额外信息存储。
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// MessageInputImage 消息中的图像输入部分。
+// 可选择使用 URL 或 Base64Data。
+type MessageInputImage struct {
+	MessagePartCommon
+
+	// Detail 图像质量级别。
+	Detail ImageURLDetail `json:"detail,omitempty"`
+}
+
+// MessageInputAudio 消息中的音频输入部分。
+// 可选择使用 URL 或 Base64Data。
+type MessageInputAudio struct {
+	MessagePartCommon
+}
+
+// MessageInputVideo 消息中的视频输入部分。
+// 可选择使用 URL 或 Base64Data。
+type MessageInputVideo struct {
+	MessagePartCommon
+}
+
+// MessageInputFile 消息中的文件输入部分。
+// 可选择使用 URL 或 Base64Data。
+type MessageInputFile struct {
+	MessagePartCommon
+}
+
+// MessageInputPart 消息的输入部分。
+// 支持文本和多种多模态内容类型。
+type MessageInputPart struct {
+	// Type 内容类型。
+	Type ChatMessagePartType `json:"type"`
+
+	// Text 文本内容，当 Type 为 "text" 时使用。
+	Text string `json:"text,omitempty"`
+
+	// Image 图像输入，当 Type 为 "image_url" 时使用。
+	Image *MessageInputImage `json:"image,omitempty"`
+
+	// Audio 音频输入，当 Type 为 "audio_url" 时使用。
+	Audio *MessageInputAudio `json:"audio,omitempty"`
+
+	// Video 视频输入，当 Type 为 "video_url" 时使用。
+	Video *MessageInputVideo `json:"video,omitempty"`
+
+	// File 文件输入，当 Type 为 "file_url" 时使用。
+	File *MessageInputFile `json:"file,omitempty"`
+}
+
+// MessageOutputImage 消息中的图像输出部分。
+type MessageOutputImage struct {
+	MessagePartCommon
+}
+
+// MessageOutputAudio 消息中的音频输出部分。
+type MessageOutputAudio struct {
+	MessagePartCommon
+}
+
+// MessageOutputVideo 消息中的视频输出部分。
+type MessageOutputVideo struct {
+	MessagePartCommon
+}
+
+// MessageOutputPart 助手生成消息的输出部分。
+// 可包含文本或多媒体内容（图像、音频、视频）。
+type MessageOutputPart struct {
+	// Type 内容类型，例如 "text"、"image_url"、"audio_url"、"video_url"。
+	Type ChatMessagePartType `json:"type"`
+
+	// Text 文本内容，当 Type 为 "text" 时使用。
+	Text string `json:"text,omitempty"`
+
+	// Image 图像输出，当 Type 为 ChatMessagePartTypeImageURL 时使用。
+	Image *MessageOutputImage `json:"image,omitempty"`
+
+	// Audio 音频输出，当 Type 为 ChatMessagePartTypeAudioURL 时使用。
+	Audio *MessageOutputAudio `json:"audio,omitempty"`
+
+	// Video 视频输出，当 Type 为 ChatMessagePartTypeVideoURL 时使用。
+	Video *MessageOutputVideo `json:"video,omitempty"`
+}
+
+// ChatMessageImageURL 聊天消息中的图像部分（已废弃）。
+// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
+// 可选择使用 URL 或 URI。支持 RFC-2397 定义的内联图像数据。
+type ChatMessageImageURL struct {
+	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
+	// 具体使用方式请参考模型实现的文档。
+	URL string `json:"url,omitempty"`
+
+	// URI 资源 URI（已废弃）。
+	URI string `json:"uri,omitempty"`
+	// Detail 图像质量级别。
+	Detail ImageURLDetail `json:"detail,omitempty"`
+
+	// MIMEType MIME 类型，例如 "image/png"。
+	MIMEType string `json:"mime_type,omitempty"`
+	// Extra 额外信息存储。
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ChatMessagePartType 聊天消息部分的内容类型。
+type ChatMessagePartType string
+
+const (
+	// ChatMessagePartTypeText 文本类型。
+	ChatMessagePartTypeText ChatMessagePartType = "text"
+	// ChatMessagePartTypeImageURL 图像 URL 类型。
+	ChatMessagePartTypeImageURL ChatMessagePartType = "image_url"
+	// ChatMessagePartTypeAudioURL 音频 URL 类型。
+	ChatMessagePartTypeAudioURL ChatMessagePartType = "audio_url"
+	// ChatMessagePartTypeVideoURL 视频 URL 类型。
+	ChatMessagePartTypeVideoURL ChatMessagePartType = "video_url"
+	// ChatMessagePartTypeFileURL 文件 URL 类型。
+	ChatMessagePartTypeFileURL ChatMessagePartType = "file_url"
+)
+
+// ChatMessageAudioURL 聊天消息中的音频部分（已废弃）。
+// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
+// 可选择使用 URL 或 URI。支持 RFC-2397 定义的内联音频数据。
+type ChatMessageAudioURL struct {
+	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
+	// 具体使用方式请参考模型实现的文档。
+	URL string `json:"url,omitempty"`
+	// URI 资源 URI（已废弃）。
+	URI string `json:"uri,omitempty"`
+
+	// MIMEType MIME 类型，例如 "audio/wav"、"audio/ogg"。
+	MIMEType string `json:"mime_type,omitempty"`
+	// Extra 额外信息存储。
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ChatMessageVideoURL 聊天消息中的视频部分（已废弃）。
+// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
+// 可选择使用 URL 或 URI。支持 RFC-2397 定义的内联视频数据。
+type ChatMessageVideoURL struct {
+	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
+	// 具体使用方式请参考模型实现的文档。
+	URL string `json:"url,omitempty"`
+	// URI 资源 URI（已废弃）。
+	URI string `json:"uri,omitempty"`
+
+	// MIMEType MIME 类型，例如 "video/mp4"。
+	MIMEType string `json:"mime_type,omitempty"`
+	// Extra 额外信息存储。
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ChatMessageFileURL 聊天消息中的文件部分（已废弃）。
+// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
+// 可选择使用 URL 或 URI。
+type ChatMessageFileURL struct {
+	// URL 资源 URL。
+	URL string `json:"url,omitempty"`
+	// URI 资源 URI（已废弃）。
+	URI string `json:"uri,omitempty"`
+
+	// MIMEType MIME 类型，例如 "application/pdf"、"text/plain"。
+	MIMEType string `json:"mime_type,omitempty"`
+	// Name 文件名称。
+	Name string `json:"name,omitempty"`
+
+	// Extra 额外信息存储。
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ChatMessagePart 聊天消息中的内容部分（已废弃）。
+// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
+type ChatMessagePart struct {
+	// Type 内容类型，例如 "text"、"image_url"、"audio_url"、"video_url"、"file_url"。
+	Type ChatMessagePartType `json:"type,omitempty"`
+
+	// Text 文本内容，当 Type 为 "text" 时使用。
+	Text string `json:"text,omitempty"`
+
+	// ImageURL 图像 URL，当 Type 为 "image_url" 时使用。
+	ImageURL *ChatMessageImageURL `json:"image_url,omitempty"`
+	// AudioURL 音频 URL，当 Type 为 "audio_url" 时使用。
+	AudioURL *ChatMessageAudioURL `json:"audio_url,omitempty"`
+	// VideoURL 视频 URL，当 Type 为 "video_url" 时使用。
+	VideoURL *ChatMessageVideoURL `json:"video_url,omitempty"`
+	// FileURL 文件 URL，当 Type 为 "file_url" 时使用。
+	FileURL *ChatMessageFileURL `json:"file_url,omitempty"`
+}
+
+// LogProbs 包含日志概率信息的顶层结构。
+type LogProbs struct {
+	// Content 消息内容 token 及其日志概率信息列表。
+	Content []LogProb `json:"content"`
+}
+
+// LogProb token 的概率信息。
+type LogProb struct {
+	// Token token 的文本表示，是语言模型分词过程识别的连续字符序列。
+	// 例如：单词、词的一部分或标点符号。
+	Token string `json:"token"`
+	// LogProb token 的对数概率。
+	// 若在前 20 个最可能的 token 之内，则为实际值；否则为 -9999.0 表示极不可能。
+	LogProb float64 `json:"logprob"`
+	// Bytes token 的 UTF-8 字节表示。
+	// 用于多 token 表示单个字符时的字节组合场景。可能为空。
+	Bytes []int64 `json:"bytes,omitempty"`
+	// TopLogProbs 当前位置最可能的 token 及其对数概率列表。
+	// 在极少数情况下，返回数量可能少于请求的 top_logprobs 数量。
+	TopLogProbs []TopLogProb `json:"top_logprobs"`
+}
+
+// TopLogProb 高概率 token 的信息。
+type TopLogProb struct {
+	// Token token 的文本表示。
+	Token string `json:"token"`
+	// LogProb token 的对数概率。
+	// 若在前 20 个最可能的 token 之内，则为实际值；否则为 -9999.0。
+	LogProb float64 `json:"logprob"`
+	// Bytes token 的 UTF-8 字节表示。
+	Bytes []int64 `json:"bytes,omitempty"`
+}
+
+// ResponseMeta 聊天响应的元信息。
+type ResponseMeta struct {
+	// FinishReason 响应结束原因。
+	// 通常为 "stop"、"length"、"tool_calls"、"content_filter"、"null" 等，具体由模型实现定义。
+	FinishReason string `json:"finish_reason,omitempty"`
+	// Usage token 使用情况。
+	// 是否存在取决于聊天模型实现是否返回。
+	Usage *TokenUsage `json:"usage,omitempty"`
+	// LogProbs 日志概率信息。
+	LogProbs *LogProbs `json:"logprobs,omitempty"`
+}
+
+// Message 消息结构体，表示模型输入和输出的数据结构。
+// 来源可以是用户输入或模型返回，支持纯文本和多模态内容。
 //
-// 示例:
+// 用户纯文本输入，使用 Content 字段：
 //
-//	// 创建包含历史消息占位符的模板
-//	chatTemplate := prompt.FromMessages(
-//	        schema.SystemMessage("你是一个有用的助手"),
-//	        schema.MessagesPlaceholder("history", false), // 渲染时使用 params["history"]
-//	        schema.UserMessage("{query}"), // 用户查询消息
-//	)
-//
-//	// 准备渲染参数
-//	params := map[string]any{
-//	        "history": []*schema.Message{
-//	                {Role: "user", Content: "什么是 eino？"},
-//	                {Role: "assistant", Content: "eino 是一个很好的 LLM 应用开发框架"},
-//	        },
-//	        "query": "如何使用 eino？",
+//	&schema.Message{
+//		Role:    schema.User,
+//		Content: "法国的首都是什么？",
 //	}
 //
-//	// 渲染模板，history 占位符会被替换为参数中的消息列表
+// 用户多模态输入，使用 UserInputMultiContent 字段。
+// 可以组合文本与其他媒体（如图像）：
+//
+//	&schema.Message{
+//		Role: schema.User,
+//		UserInputMultiContent: []schema.MessageInputPart{
+//			{Type: schema.ChatMessagePartTypeText, Text: "这张图片里有什么？"},
+//			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
+//				MessagePartCommon: schema.MessagePartCommon{
+//					URL: toPtr("https://example.com/cat.jpg"),
+//				},
+//				Detail: schema.ImageURLDetailHigh,
+//			}},
+//		},
+//	}
+//
+// 模型返回多模态内容时，使用 AssistantGenMultiContent 字段：
+//
+//	&schema.Message{
+//		Role: schema.Assistant,
+//		AssistantGenMultiContent: []schema.MessageOutputPart{
+//			{Type: schema.ChatMessagePartTypeText, Text: "这是生成的图像："},
+//			{Type: schema.ChatMessagePartTypeImage, Image: &schema.MessageOutputImage{
+//				MessagePartCommon: schema.MessagePartCommon{
+//					Base64Data: toPtr("base64_image_binary"),
+//					MIMEType:   "image/png",
+//				},
+//			}},
+//		},
+//	}
+type Message struct {
+	// Role 消息角色。
+	Role RoleType `json:"role"`
+
+	// Content 文本内容。
+	// 用于用户文本输入和模型文本输出。
+	Content string `json:"content"`
+
+	// MultiContent 多内容部分（已废弃）。
+	// 已废弃：用户多模态输入使用 UserInputMultiContent，模型多模态输出使用 AssistantGenMultiContent。
+	MultiContent []ChatMessagePart `json:"multi_content,omitempty"`
+
+	// UserInputMultiContent 用户提供的多模态内容。
+	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
+
+	// AssistantGenMultiContent 模型生成的多模态输出。
+	AssistantGenMultiContent []MessageOutputPart `json:"assistant_output_multi_content,omitempty"`
+
+	// Name 消息名称。
+	Name string `json:"name,omitempty"`
+
+	// ToolCalls 工具调用列表（仅用于 Assistant 消息）。
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+
+	// ToolCallID 工具调用 ID（仅用于 Tool 消息）。
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolName 工具名称（仅用于 Tool 消息）。
+	ToolName string `json:"tool_name,omitempty"`
+
+	// ResponseMeta 响应元信息。
+	ResponseMeta *ResponseMeta `json:"response_meta,omitempty"`
+
+	// ReasoningContent 模型的思考过程。
+	// 当模型返回推理内容时包含此字段。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+
+	// Extra 模型实现的自定义信息。
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// TokenUsage 聊天模型请求的 token 使用情况。
+type TokenUsage struct {
+	// PromptTokens 提示 token 数量。
+	// 包含本次请求的所有输入 token。
+	PromptTokens int `json:"prompt_tokens"`
+	// PromptTokenDetails 提示 token 的详细分解。
+	PromptTokenDetails PromptTokenDetails `json:"prompt_token_details"`
+	// CompletionTokens 补全 token 数量。
+	CompletionTokens int `json:"completion_tokens"`
+	// TotalTokens 总 token 数量。
+	TotalTokens int `json:"total_tokens"`
+}
+
+// PromptTokenDetails 提示 token 的详细信息。
+type PromptTokenDetails struct {
+	// CachedTokens 提示中的缓存 token 数量。
+	CachedTokens int `json:"cached_tokens"`
+}
+
+var _ MessagesTemplate = &Message{}
+var _ MessagesTemplate = MessagesPlaceholder("", false)
+
+// MessagesTemplate 消息模板接口。
+// 用于将模板渲染为消息列表。
+//
+// 使用示例：
+//
+//	chatTemplate := prompt.FromMessages(
+//		schema.SystemMessage("you are eino helper"),
+//		schema.MessagesPlaceholder("history", false), // 使用 params 中的 "history" 值
+//	)
+//	msgs, err := chatTemplate.Format(ctx, params)
+type MessagesTemplate interface {
+	Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error)
+}
+
+// messagesPlaceholder 消息占位符实现。
+type messagesPlaceholder struct {
+	key      string // 参数键名。
+	optional bool   // 是否可选。
+}
+
+// MessagesPlaceholder 创建消息占位符。
+// 将占位符渲染为参数中的消息列表。
+//
+// 使用示例：
+//
+//	placeholder := MessagesPlaceholder("history", false)
+//	params := map[string]any{
+//		"history": []*schema.Message{{Role: "user", Content: "what is eino?"}, {Role: "assistant", Content: "eino is a great framework to build llm apps"}},
+//		"query": "how to use eino?",
+//	}
+//	chatTemplate := prompt.FromMessages(
+//		schema.SystemMessage("you are eino helper"),
+//		schema.MessagesPlaceholder("history", false), // 使用 params 中的 "history" 值
+//	)
 //	msgs, err := chatTemplate.Format(ctx, params)
 func MessagesPlaceholder(key string, optional bool) MessagesTemplate {
 	return &messagesPlaceholder{
@@ -680,17 +525,79 @@ func MessagesPlaceholder(key string, optional bool) MessagesTemplate {
 	}
 }
 
-// === Layer 4: 类型方法层 ===
-
-// 4.1 Message 方法
-
-// Format - 按指定格式渲染消息内容，支持文本和多模态内容的模板替换。
+// Format 返回指定键对应的消息列表。
+// 因为这是占位符，所以直接返回参数中的消息。
 //
-// 示例:
+// 使用示例：
+//
+//	placeholder := MessagesPlaceholder("history", false)
+//	params := map[string]any{
+//		"history": []*schema.Message{{Role: "user", Content: "what is eino?"}, {Role: "assistant", Content: "eino is a great framework to build llm apps"}},
+//		"query": "how to use eino?",
+//	}
+//	msgs, err := placeholder.Format(ctx, params) // 返回 params 中 "history" 的值
+func (p *messagesPlaceholder) Format(_ context.Context, vs map[string]any, _ FormatType) ([]*Message, error) {
+	v, ok := vs[p.key]
+	if !ok {
+		if p.optional {
+			return []*Message{}, nil
+		}
+
+		return nil, fmt.Errorf("message placeholder format: %s not found", p.key)
+	}
+
+	msgs, ok := v.([]*Message)
+	if !ok {
+		return nil, fmt.Errorf("only messages can be used to format message placeholder, key: %v, actual type: %v", p.key, reflect.TypeOf(v))
+	}
+
+	return msgs, nil
+}
+
+// formatContent 根据格式化类型格式化内容字符串。
+func formatContent(content string, vs map[string]any, formatType FormatType) (string, error) {
+	switch formatType {
+	case FString:
+		return pyfmt.Fmt(content, vs)
+	case GoTemplate:
+		parsedTmpl, err := template.New("template").
+			Option("missingkey=error").
+			Parse(content)
+		if err != nil {
+			return "", err
+		}
+		sb := new(strings.Builder)
+		err = parsedTmpl.Execute(sb, vs)
+		if err != nil {
+			return "", err
+		}
+		return sb.String(), nil
+	case Jinja2:
+		env, err := getJinjaEnv()
+		if err != nil {
+			return "", err
+		}
+		tpl, err := env.FromString(content)
+		if err != nil {
+			return "", err
+		}
+		out, err := tpl.Execute(vs)
+		if err != nil {
+			return "", err
+		}
+		return out, nil
+	default:
+		return "", fmt.Errorf("unknown format type: %v", formatType)
+	}
+}
+
+// Format 根据指定格式类型渲染消息并返回。
+//
+// 使用示例：
 //
 //	msg := schema.UserMessage("hello world, {name}")
-//	msgs, err := msg.Format(ctx, map[string]any{"name": "eino"}, schema.FString)
-//	// msgs[0].Content == "hello world, eino"
+//	msgs, err := msg.Format(ctx, map[string]any{"name": "eino"}, schema.FString) // 使用 pyfmt 渲染消息内容
+//	// msgs[0].Content 将是 "hello world, eino"
 func (m *Message) Format(_ context.Context, vs map[string]any, formatType FormatType) ([]*Message, error) {
 	c, err := formatContent(m.Content, vs, formatType)
 	if err != nil {
@@ -699,91 +606,274 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	copied := *m
 	copied.Content = c
 
+	if len(m.MultiContent) > 0 {
+		copied.MultiContent, err = formatMultiContent(m.MultiContent, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(m.UserInputMultiContent) > 0 {
+		copied.UserInputMultiContent, err = formatUserInputMultiContent(m.UserInputMultiContent, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return []*Message{&copied}, nil
 }
 
-// String - 返回消息的字符串表示，包含角色、内容和工具调用等信息。
+// formatMultiContent 格式化多内容部分（已废弃的 MultiContent 字段）。
+func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, formatType FormatType) ([]ChatMessagePart, error) {
+	copiedMC := make([]ChatMessagePart, len(multiContent))
+	copy(copiedMC, multiContent)
+
+	for i, mc := range copiedMC {
+		switch mc.Type {
+		case ChatMessagePartTypeText:
+			nmc, err := formatContent(mc.Text, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copiedMC[i].Text = nmc
+		case ChatMessagePartTypeImageURL:
+			if mc.ImageURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.ImageURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copiedMC[i].ImageURL.URL = url
+		case ChatMessagePartTypeAudioURL:
+			if mc.AudioURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.AudioURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copiedMC[i].AudioURL.URL = url
+		case ChatMessagePartTypeVideoURL:
+			if mc.VideoURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.VideoURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copiedMC[i].VideoURL.URL = url
+		case ChatMessagePartTypeFileURL:
+			if mc.FileURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.FileURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copiedMC[i].FileURL.URL = url
+		}
+	}
+
+	return copiedMC, nil
+}
+
+// formatUserInputMultiContent 格式化用户输入的多模态内容。
+func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs map[string]any, formatType FormatType) ([]MessageInputPart, error) {
+	copiedUIMC := make([]MessageInputPart, len(userInputMultiContent))
+	copy(copiedUIMC, userInputMultiContent)
+
+	for i, uimc := range copiedUIMC {
+		switch uimc.Type {
+		case ChatMessagePartTypeText:
+			text, err := formatContent(uimc.Text, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copiedUIMC[i].Text = text
+		case ChatMessagePartTypeImageURL:
+			if uimc.Image == nil {
+				continue
+			}
+			if uimc.Image.URL != nil && *uimc.Image.URL != "" {
+				url, err := formatContent(*uimc.Image.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Image.URL = &url
+			}
+			if uimc.Image.Base64Data != nil && *uimc.Image.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Image.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Image.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeAudioURL:
+			if uimc.Audio == nil {
+				continue
+			}
+			if uimc.Audio.URL != nil && *uimc.Audio.URL != "" {
+				url, err := formatContent(*uimc.Audio.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Audio.URL = &url
+			}
+			if uimc.Audio.Base64Data != nil && *uimc.Audio.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Audio.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Audio.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeVideoURL:
+			if uimc.Video == nil {
+				continue
+			}
+			if uimc.Video.URL != nil && *uimc.Video.URL != "" {
+				url, err := formatContent(*uimc.Video.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Video.URL = &url
+			}
+			if uimc.Video.Base64Data != nil && *uimc.Video.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Video.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Video.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeFileURL:
+			if uimc.File == nil {
+				continue
+			}
+			if uimc.File.URL != nil && *uimc.File.URL != "" {
+				url, err := formatContent(*uimc.File.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].File.URL = &url
+			}
+			if uimc.File.Base64Data != nil && *uimc.File.Base64Data != "" {
+				base64data, err := formatContent(*uimc.File.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].File.Base64Data = &base64data
+			}
+		}
+	}
+
+	return copiedUIMC, nil
+}
+
+// String 返回消息的字符串表示。
 //
-// 示例:
+// 使用示例：
 //
 //	msg := schema.UserMessage("hello world")
-//	fmt.Println(msg.String()) // 输出: `user: hello world`
+//	fmt.Println(msg.String()) // 输出: user: hello world
 //
-//	工具消息示例:
-//	msg := schema.ToolMessage("result", "call123")
+//	msg := schema.Message{
+//		Role:    schema.Tool,
+//		Content: "{...}",
+//		ToolCallID: "callxxxx"
+//	}
 //	fmt.Println(msg.String())
 //	// 输出:
-//	// tool: result
-//	// tool_call_id: call123
+//	//   tool: {...}
+//	//   call_id: callxxxx
 func (m *Message) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("%s: %s", m.Role, m.Content))
 	if len(m.ReasoningContent) > 0 {
-		sb.WriteString("\n推理内容:\n")
+		sb.WriteString("\nreasoning content:\n")
 		sb.WriteString(m.ReasoningContent)
 	}
 	if len(m.ToolCalls) > 0 {
-		sb.WriteString("\n工具调用:\n")
+		sb.WriteString("\ntool_calls:\n")
 		for _, tc := range m.ToolCalls {
 			if tc.Index != nil {
-				sb.WriteString(fmt.Sprintf("索引[%d]:", *tc.Index))
+				sb.WriteString(fmt.Sprintf("index[%d]:", *tc.Index))
 			}
 			sb.WriteString(fmt.Sprintf("%+v\n", tc))
 		}
 	}
 	if m.ToolCallID != "" {
-		sb.WriteString(fmt.Sprintf("\n工具调用ID: %s", m.ToolCallID))
+		sb.WriteString(fmt.Sprintf("\ntool_call_id: %s", m.ToolCallID))
 	}
 	if m.ToolName != "" {
-		sb.WriteString(fmt.Sprintf("\n工具调用名称: %s", m.ToolName))
+		sb.WriteString(fmt.Sprintf("\ntool_call_name: %s", m.ToolName))
 	}
 	if m.ResponseMeta != nil {
-		sb.WriteString(fmt.Sprintf("\n完成原因: %s", m.ResponseMeta.FinishReason))
+		sb.WriteString(fmt.Sprintf("\nfinish_reason: %s", m.ResponseMeta.FinishReason))
 		if m.ResponseMeta.Usage != nil {
-			sb.WriteString(fmt.Sprintf("\n用量: %v", m.ResponseMeta.Usage))
+			sb.WriteString(fmt.Sprintf("\nusage: %v", m.ResponseMeta.Usage))
 		}
 	}
 
 	return sb.String()
 }
 
-// 4.2 其他类型方法
-
-// Format - 返回参数中指定键名的消息列表，实现占位符的渲染逻辑。
-//
-// 示例:
-//
-//	placeholder := MessagesPlaceholder("history", false)
-//	params := map[string]any{
-//	        "history": []*schema.Message{
-//	                {Role: "user", Content: "什么是 eino？"},
-//	                {Role: "assistant", Content: "eino 是一个很好的 LLM 应用开发框架"},
-//	        },
-//	        "query": "如何使用 eino？",
-//	}
-//	msgs, err := placeholder.Format(ctx, params) // 返回 params["history"] 的消息列表
-func (p *messagesPlaceholder) Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error) {
-	v, ok := vs[p.key]
-	if !ok {
-		if p.optional {
-			return []*Message{}, nil
-		}
-
-		return nil, fmt.Errorf("消息占位符格式化：未找到键 '%s'", p.key)
+// SystemMessage 创建系统消息。
+func SystemMessage(content string) *Message {
+	return &Message{
+		Role:    System,
+		Content: content,
 	}
-
-	msgs, ok := v.([]*Message)
-	if !ok {
-		return nil, fmt.Errorf("消息占位符只能使用消息列表格式化，键: '%v'，实际类型: %v", p.key, reflect.TypeOf(v))
-	}
-
-	return msgs, nil
 }
 
-// === Layer 5: 内部工具函数层 ===
+// AssistantMessage 创建助手消息。
+func AssistantMessage(content string, toolCalls []ToolCall) *Message {
+	return &Message{
+		Role:      Assistant,
+		Content:   content,
+		ToolCalls: toolCalls,
+	}
+}
 
-// 5.1 内部实现
+// UserMessage 创建用户消息。
+func UserMessage(content string) *Message {
+	return &Message{
+		Role:    User,
+		Content: content,
+	}
 
+}
+
+// toolMessageOptions 工具消息的选项配置。
+type toolMessageOptions struct {
+	toolName string // 工具名称。
+}
+
+// ToolMessageOption 工具消息选项函数类型。
+type ToolMessageOption func(*toolMessageOptions)
+
+// WithToolName 设置工具调用名称。
+func WithToolName(name string) ToolMessageOption {
+	return func(o *toolMessageOptions) {
+		o.toolName = name
+	}
+}
+
+// ToolMessage 创建工具消息。
+func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *Message {
+	o := &toolMessageOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return &Message{
+		Role:       Tool,
+		Content:    content,
+		ToolCallID: toolCallID,
+		ToolName:   o.toolName,
+	}
+}
+
+// concatToolCalls 合并工具调用分块。
+// 根据 Index 字段合并相同工具调用的多个分块。
 func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	var merged []ToolCall
 	m := make(map[int][]int)
@@ -805,7 +895,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 		}
 
 		args.Reset()
-		toolID, toolType, toolName := "", "", "" // 这些字段将在任何块中原子性地输出
+		toolID, toolType, toolName := "", "", "" // these field will output atomically in any chunk
 
 		for _, n := range v {
 			chunk := chunks[n]
@@ -813,7 +903,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 				if toolID == "" {
 					toolID = chunk.ID
 				} else if toolID != chunk.ID {
-					return nil, fmt.Errorf("无法连接不同工具调用ID的工具调用：'%s' '%s'", toolID, chunk.ID)
+					return nil, fmt.Errorf("cannot concat ToolCalls with different tool id: '%s' '%s'", toolID, chunk.ID)
 				}
 
 			}
@@ -822,7 +912,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 				if toolType == "" {
 					toolType = chunk.Type
 				} else if toolType != chunk.Type {
-					return nil, fmt.Errorf("无法连接不同工具类型的工具调用：'%s' '%s'", toolType, chunk.Type)
+					return nil, fmt.Errorf("cannot concat ToolCalls with different tool type: '%s' '%s'", toolType, chunk.Type)
 				}
 			}
 
@@ -830,7 +920,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 				if toolName == "" {
 					toolName = chunk.Function.Name
 				} else if toolName != chunk.Function.Name {
-					return nil, fmt.Errorf("无法连接不同工具名称的工具调用：'%s' '%s'", toolName, chunk.Function.Name)
+					return nil, fmt.Errorf("cannot concat ToolCalls with different tool name: '%s' '%s'", toolName, chunk.Function.Name)
 				}
 			}
 
@@ -868,6 +958,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	return merged, nil
 }
 
+// isBase64AudioPart 检查是否为 Base64 编码的音频部分。
 func isBase64AudioPart(part MessageOutputPart) bool {
 	return part.Type == ChatMessagePartTypeAudioURL &&
 		part.Audio != nil &&
@@ -875,7 +966,8 @@ func isBase64AudioPart(part MessageOutputPart) bool {
 		part.Audio.URL == nil
 }
 
-// 合并助手生成的多个内容部分。
+// concatAssistantMultiContent 合并助手多内容部分。
+// 连续的文本部分会被合并，连续的 Base64 音频部分会被合并。
 func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart, error) {
 	if len(parts) == 0 {
 		return parts, nil
@@ -888,18 +980,18 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 		start := i
 
 		if currentPart.Type == ChatMessagePartTypeText {
-			// --- 文本合并 ---
-			// 查找连续文本块的结束位置
+			// --- Text Merging ---
+			// Find end of contiguous text block
 			end := start + 1
 			for end < len(parts) && parts[end].Type == ChatMessagePartTypeText {
 				end++
 			}
 
-			// 只有一个部分，直接追加
+			// If only one part, just append it
 			if end == start+1 {
 				merged = append(merged, currentPart)
 			} else {
-				// 合并多个部分
+				// Multiple parts to merge
 				var sb strings.Builder
 				for k := start; k < end; k++ {
 					sb.WriteString(parts[k].Text)
@@ -912,18 +1004,18 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 			}
 			i = end
 		} else if isBase64AudioPart(currentPart) {
-			// --- 音频合并 ---
-			// 查找连续音频块的结束位置
+			// --- Audio Merging ---
+			// Find end of contiguous audio block
 			end := start + 1
 			for end < len(parts) && isBase64AudioPart(parts[end]) {
 				end++
 			}
 
-			// 只有一个部分，直接追加
+			// If only one part, just append it
 			if end == start+1 {
 				merged = append(merged, currentPart)
 			} else {
-				// 合并多个部分
+				// Multiple parts to merge
 				var b64Builder strings.Builder
 				var mimeType string
 				extraList := make([]map[string]any, 0, end-start)
@@ -946,7 +1038,7 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 				if len(extraList) > 0 {
 					mergedExtra, err = concatExtra(extraList)
 					if err != nil {
-						return nil, fmt.Errorf("合并音频额外信息失败: %w", err)
+						return nil, fmt.Errorf("failed to concat audio extra: %w", err)
 					}
 				}
 
@@ -965,7 +1057,7 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 			}
 			i = end
 		} else {
-			// --- 其他类型：不可合并部分，直接追加 ---
+			// --- Non-mergeable part ---
 			merged = append(merged, currentPart)
 			i++
 		}
@@ -974,6 +1066,7 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 	return merged, nil
 }
 
+// concatExtra 合并额外信息映射。
 func concatExtra(extraList []map[string]any) (map[string]any, error) {
 	if len(extraList) == 1 {
 		return generic.CopyMap(extraList[0]), nil
@@ -982,56 +1075,247 @@ func concatExtra(extraList []map[string]any) (map[string]any, error) {
 	return internal.ConcatItems(extraList)
 }
 
-// formatContent - 根据指定格式类型渲染内容模板，支持 FString、GoTemplate 和 Jinja2。
-func formatContent(content string, vs map[string]any, formatType FormatType) (string, error) {
-	switch formatType {
-	case FString:
-		return pyfmt.Fmt(content, vs)
-	case GoTemplate:
-		parsedTmpl, err := template.New("template").
-			Option("missingkey=error").
-			Parse(content)
-		if err != nil {
-			return "", err
+// ConcatMessages 合并具有相同角色和名称的消息。
+// 合并相同索引的工具调用，若消息角色或名称不同则返回错误。
+// 适用于流式消息的合并场景。
+//
+// 使用示例：
+//
+//	msgs := []*Message{}
+//	for {
+//		msg, err := stream.Recv()
+//		if errors.Is(err, io.EOF) {
+//			break
+//		}
+//		if err != nil {...}
+//		msgs = append(msgs, msg)
+//	}
+//	concatedMsg, err := ConcatMessages(msgs) // concatedMsg.Content 将是所有消息的完整内容
+func ConcatMessages(msgs []*Message) (*Message, error) {
+	var (
+		contents                      []string
+		contentLen                    int
+		reasoningContents             []string
+		reasoningContentLen           int
+		toolCalls                     []ToolCall
+		multiContentParts             []ChatMessagePart
+		assistantGenMultiContentParts []MessageOutputPart
+		ret                           = Message{}
+		extraList                     = make([]map[string]any, 0, len(msgs))
+	)
+
+	for idx, msg := range msgs {
+		if msg == nil {
+			return nil, fmt.Errorf("unexpected nil chunk in message stream, index: %d", idx)
 		}
-		sb := new(strings.Builder)
-		err = parsedTmpl.Execute(sb, vs)
-		if err != nil {
-			return "", err
+
+		if msg.Role != "" {
+			if ret.Role == "" {
+				ret.Role = msg.Role
+			} else if ret.Role != msg.Role {
+				return nil, fmt.Errorf("cannot concat messages with "+
+					"different roles: '%s' '%s'", ret.Role, msg.Role)
+			}
 		}
-		return sb.String(), nil
-	case Jinja2:
-		env, err := getJinjaEnv()
-		if err != nil {
-			return "", err
+
+		if msg.Name != "" {
+			if ret.Name == "" {
+				ret.Name = msg.Name
+			} else if ret.Name != msg.Name {
+				return nil, fmt.Errorf("cannot concat messages with"+
+					" different names: '%s' '%s'", ret.Name, msg.Name)
+			}
 		}
-		tpl, err := env.FromString(content)
-		if err != nil {
-			return "", err
+
+		if msg.ToolCallID != "" {
+			if ret.ToolCallID == "" {
+				ret.ToolCallID = msg.ToolCallID
+			} else if ret.ToolCallID != msg.ToolCallID {
+				return nil, fmt.Errorf("cannot concat messages with"+
+					" different toolCallIDs: '%s' '%s'", ret.ToolCallID, msg.ToolCallID)
+			}
 		}
-		out, err := tpl.Execute(vs)
-		if err != nil {
-			return "", err
+		if msg.ToolName != "" {
+			if ret.ToolName == "" {
+				ret.ToolName = msg.ToolName
+			} else if ret.ToolName != msg.ToolName {
+				return nil, fmt.Errorf("cannot concat messages with"+
+					" different toolNames: '%s' '%s'", ret.ToolCallID, msg.ToolCallID)
+			}
 		}
-		return out, nil
-	default:
-		return "", fmt.Errorf("未知的格式类型: %v", formatType)
+
+		if msg.Content != "" {
+			contents = append(contents, msg.Content)
+			contentLen += len(msg.Content)
+		}
+		if msg.ReasoningContent != "" {
+			reasoningContents = append(reasoningContents, msg.ReasoningContent)
+			reasoningContentLen += len(msg.ReasoningContent)
+		}
+
+		if len(msg.ToolCalls) > 0 {
+			toolCalls = append(toolCalls, msg.ToolCalls...)
+		}
+
+		if len(msg.Extra) > 0 {
+			extraList = append(extraList, msg.Extra)
+		}
+
+		// The 'MultiContent' field is deprecated but is kept for backward compatibility.
+		if len(msg.MultiContent) > 0 {
+			multiContentParts = append(multiContentParts, msg.MultiContent...)
+		}
+
+		if len(msg.AssistantGenMultiContent) > 0 {
+			assistantGenMultiContentParts = append(assistantGenMultiContentParts, msg.AssistantGenMultiContent...)
+		}
+
+		if msg.ResponseMeta != nil && ret.ResponseMeta == nil {
+			ret.ResponseMeta = &ResponseMeta{}
+		}
+
+		if msg.ResponseMeta != nil && ret.ResponseMeta != nil {
+			// keep the last FinishReason with a valid value.
+			if msg.ResponseMeta.FinishReason != "" {
+				ret.ResponseMeta.FinishReason = msg.ResponseMeta.FinishReason
+			}
+
+			if msg.ResponseMeta.Usage != nil {
+				if ret.ResponseMeta.Usage == nil {
+					ret.ResponseMeta.Usage = &TokenUsage{}
+				}
+
+				if msg.ResponseMeta.Usage.PromptTokens > ret.ResponseMeta.Usage.PromptTokens {
+					ret.ResponseMeta.Usage.PromptTokens = msg.ResponseMeta.Usage.PromptTokens
+				}
+				if msg.ResponseMeta.Usage.CompletionTokens > ret.ResponseMeta.Usage.CompletionTokens {
+					ret.ResponseMeta.Usage.CompletionTokens = msg.ResponseMeta.Usage.CompletionTokens
+				}
+
+				if msg.ResponseMeta.Usage.TotalTokens > ret.ResponseMeta.Usage.TotalTokens {
+					ret.ResponseMeta.Usage.TotalTokens = msg.ResponseMeta.Usage.TotalTokens
+				}
+
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens
+				}
+			}
+
+			if msg.ResponseMeta.LogProbs != nil {
+				if ret.ResponseMeta.LogProbs == nil {
+					ret.ResponseMeta.LogProbs = &LogProbs{}
+				}
+
+				ret.ResponseMeta.LogProbs.Content = append(ret.ResponseMeta.LogProbs.Content, msg.ResponseMeta.LogProbs.Content...)
+			}
+
+		}
 	}
+
+	if len(contents) > 0 {
+		var sb strings.Builder
+		sb.Grow(contentLen)
+		for _, content := range contents {
+			_, err := sb.WriteString(content)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		ret.Content = sb.String()
+	}
+	if len(reasoningContents) > 0 {
+		var sb strings.Builder
+		sb.Grow(reasoningContentLen)
+		for _, rc := range reasoningContents {
+			_, err := sb.WriteString(rc)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		ret.ReasoningContent = sb.String()
+	}
+
+	if len(toolCalls) > 0 {
+		merged, err := concatToolCalls(toolCalls)
+		if err != nil {
+			return nil, err
+		}
+
+		ret.ToolCalls = merged
+	}
+
+	if len(extraList) > 0 {
+		extra, err := concatExtra(extraList)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat message's extra: %w", err)
+		}
+
+		if len(extra) > 0 {
+			ret.Extra = extra
+		}
+	}
+
+	if len(multiContentParts) > 0 {
+		ret.MultiContent = multiContentParts
+	}
+
+	if len(assistantGenMultiContentParts) > 0 {
+		merged, err := concatAssistantMultiContent(assistantGenMultiContentParts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat message's assistant multi content: %w", err)
+		}
+		ret.AssistantGenMultiContent = merged
+	}
+
+	return &ret, nil
 }
 
-// 5.2 模板工具函数
+// ConcatMessageStream 从流式读取器合并消息。
+// 读取所有消息并合并为单个消息。
+func ConcatMessageStream(s *StreamReader[*Message]) (*Message, error) {
+	defer s.Close()
+
+	var msgs []*Message
+	for {
+		msg, err := s.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return nil, err
+		}
+
+		msgs = append(msgs, msg)
+	}
+
+	return ConcatMessages(msgs)
+}
+
+// jinjaEnvOnce 确保 jinja 环境只初始化一次。
+var jinjaEnvOnce sync.Once
+
+// jinjaEnv 自定义的 jinja 环境实例。
+var jinjaEnv *gonja.Environment
+
+// envInitErr jinja 环境初始化错误。
+var envInitErr error
 
 const (
-	jinjaInclude = "include" // Jinja 包含语法
-	jinjaExtends = "extends" // Jinja 继承语法
-	jinjaImport  = "import"  // Jinja 导入语法
-	jinjaFrom    = "from"    // Jinja 变量引用语法
+	// jinjaInclude 禁用的 include 关键字。
+	jinjaInclude = "include"
+	// jinjaExtends 禁用的 extends 关键字。
+	jinjaExtends = "extends"
+	// jinjaImport 禁用的 import 关键字。
+	jinjaImport = "import"
+	// jinjaFrom 禁用的 from 关键字。
+	jinjaFrom = "from"
 )
 
-var jinjaEnvOnce sync.Once      // 确保只初始化一次
-var jinjaEnv *gonja.Environment // 全局环境实例
-var envInitErr error            // 初始化错误状态
-
+// getJinjaEnv 获取自定义的 jinja 环境。
+// 禁用了 include、extends、import、from 等不安全的关键字。
 func getJinjaEnv() (*gonja.Environment, error) {
 	jinjaEnvOnce.Do(func() {
 		jinjaEnv = gonja.NewEnvironment(config.DefaultConfig, gonja.DefaultLoader)
@@ -1075,15 +1359,4 @@ func getJinjaEnv() (*gonja.Environment, error) {
 		}
 	})
 	return jinjaEnv, envInitErr
-}
-
-// 5.3 类型断言（验证实现关系）
-var _ MessagesTemplate = &Message{}                     // 验证 Message 实现接口
-var _ MessagesTemplate = MessagesPlaceholder("", false) // 验证占位符实现接口
-
-// 5.4 包初始化
-
-func init() {
-	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
-	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
 }

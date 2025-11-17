@@ -61,7 +61,7 @@ func WithGenLocalState[S any](gls GenLocalState[S]) NewGraphOption {
 
 // ====== 图创建与构建 ======
 
-// NewGraph 创建有向图 - 支持组件、Lambda、Chain、并行等的灵活组合。
+// NewGraph 创建有向图 - 支持组件、GraLambda、Chain、并行等的灵活组合。
 //
 // 同时提供灵活且多粒度的切面治理能力
 //

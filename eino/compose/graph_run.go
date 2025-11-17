@@ -1,5 +1,23 @@
 package compose
 
+/*
+ * graph_run.go - Graph 执行引擎实现
+ *
+ * 核心组件：
+ *   - runner: 图执行器，封装执行状态和调度逻辑
+ *   - chanCall: 节点执行封装，管理节点连接关系
+ *   - taskManager/channelManager: 任务和通道管理
+ *
+ * 设计特点：
+ *   - Pregel 风格消息传递计算模型
+ *   - 支持检查点恢复和断点续传
+ *   - 节点前/后中断和优雅重试
+ *   - 统一同步和流式执行模式
+ *
+ * 与其他文件关系：
+ *   - 为 Graph 提供运行时执行能力
+ *   - 支持 DAG 和循环图两种拓扑
+ */
 import (
 	"context"
 	"errors"
@@ -10,144 +28,75 @@ import (
 	"github.com/favbox/eino/internal"
 )
 
-// chanCall 通道调用结构体 - 封装节点执行和连接信息
-// 设计意图：统一管理节点的执行器、连接关系和处理器装饰器
-// 关键字段：
-//   - action: 节点的实际执行逻辑（可执行对象）
-//   - writeTo: 数据边连接的后续节点
-//   - writeToBranches: 分支连接的后续节点
-//   - controls: 控制边连接的后续节点
-//   - preProcessor/postProcessor: 节点前后装饰器
+// ====== 节点执行封装 ======
+
+// chanCall 节点执行封装，管理执行器和连接关系
 type chanCall struct {
-	// 节点执行器：封装节点的执行逻辑
-	action *composableRunnable
-	// 数据边连接：节点输出数据传输到的后续节点
-	writeTo []string
-	// 分支连接：通过条件分支连接的后续节点
+	action          *composableRunnable
+	writeTo         []string
 	writeToBranches []*GraphBranch
 
-	// 控制边连接：分支必须控制的节点（用于执行顺序）
 	controls []string
 
-	// 节点前后置处理器：装饰节点的执行逻辑
 	preProcessor, postProcessor *composableRunnable
 }
 
-// chanBuilder 通道构建器函数类型 - 根据依赖关系创建通道
-// 设计意图：支持 Pregel 和 DAG 两种不同的通道构建策略
-// 参数：
-//   - dependencies: 直接依赖节点列表
-//   - indirectDependencies: 间接依赖节点列表
-//   - zeroValue: 零值工厂函数（用于初始化）
-//   - emptyStream: 空流工厂函数（用于初始化）
-//
-// 返回：构建好的通道对象
+// chanBuilder 通道构建策略，支持 Pregel/DAG 两种模式
 type chanBuilder func(dependencies []string, indirectDependencies []string, zeroValue func() any, emptyStream func() streamReader) channel
 
-// runner 图运行器结构体 - 封装图的执行引擎和运行时状态
-// 设计意图：统一管理图执行的所有要素，包括节点映射、依赖关系、处理器和执行配置
-// 关键组成部分：
-//   - 节点管理：chanSubscribeTo（节点执行器）、successors（后续节点）
-//   - 依赖关系：dataPredecessors（数据前置）、controlPredecessors（控制前置）
-//   - 执行模式：eager（急切执行）、dag（DAG模式）、chanBuilder（通道构建策略）
-//   - 类型系统：inputType、outputType、genericHelper（类型辅助）
-//   - 处理器：edgeHandlerManager、preNodeHandlerManager、preBranchHandlerManager
-//   - 执行控制：checkPointer（检查点）、interruptBefore/AfterNodes（中断控制）
-//   - 合并配置：mergeConfigs（扇入合并策略）
+// ====== 图执行引擎 ======
+
+// runner 图执行引擎，封装完整的运行时状态和调度逻辑
 type runner struct {
-	// 节点执行器映射：节点键到通道调用的映射
-	chanSubscribeTo map[string]*chanCall
-
-	// 后续节点映射：节点的后续节点列表
-	successors map[string][]string
-	// 数据前置依赖：节点到其数据前置节点的映射
-	dataPredecessors map[string][]string
-	// 控制前置依赖：节点到其控制前置节点的映射
+	// 节点拓扑
+	chanSubscribeTo     map[string]*chanCall
+	successors          map[string][]string
+	dataPredecessors    map[string][]string
 	controlPredecessors map[string][]string
+	inputChannels       *chanCall
 
-	// 输入通道：图的入口通道
-	inputChannels *chanCall
-
-	// 通道构建器：基于依赖关系创建通道（可为nil）
-	// Pregel和DAG模式使用不同的构建策略
+	// 执行模式
 	chanBuilder chanBuilder
-	// 急切执行模式：是否启用急切执行
-	eager bool
-	// DAG模式标记：是否为有向无环图
-	dag bool
+	eager       bool
+	dag         bool
+	runCtx      func(ctx context.Context) context.Context
+	options     graphCompileOptions
 
-	// 运行上下文生成器：为执行生成上下文（支持状态注入）
-	runCtx func(ctx context.Context) context.Context
-
-	// 编译选项：图的编译时配置
-	options graphCompileOptions
-
-	// 输入输出类型：图的类型信息
-	inputType  reflect.Type
-	outputType reflect.Type
-
-	// 子图处理：通过 toComposableRunnable 生效
-	// 输入流过滤器：处理输入流
-	inputStreamFilter streamMapFilter
-	// 输入转换器：处理输入转换
-	inputConverter handlerPair
-	// 输入字段映射转换器：处理字段映射
-	inputFieldMappingConverter handlerPair
-	// 输入输出流转换对：流式处理的转换器
+	// 类型系统
+	inputType                                       reflect.Type
+	outputType                                      reflect.Type
+	inputStreamFilter                               streamMapFilter
+	inputConverter                                  handlerPair
+	inputFieldMappingConverter                      handlerPair
 	inputConvertStreamPair, outputConvertStreamPair streamConvertPair
-
-	// 通用辅助系统：类型安全和转换
 	*genericHelper
 
-	// 运行时检查：编译时无法检查的验证
-	// 运行时检查边：需要运行时验证的边
-	runtimeCheckEdges map[string]map[string]bool
-	// 运行时检查分支：需要运行时验证的分支
+	// 运行时检查
+	runtimeCheckEdges    map[string]map[string]bool
 	runtimeCheckBranches map[string][]bool
 
-	// 处理器管理器：
-	// 边处理器管理器：处理边上的数据转换
-	edgeHandlerManager *edgeHandlerManager
-	// 节点前置处理器管理器：处理节点前置逻辑
-	preNodeHandlerManager *preNodeHandlerManager
-	// 分支前置处理器管理器：处理分支前置逻辑
+	// 处理器管理
+	edgeHandlerManager      *edgeHandlerManager
+	preNodeHandlerManager   *preNodeHandlerManager
 	preBranchHandlerManager *preBranchHandlerManager
 
-	// 检查点和中断控制：
-	// 检查点：支持断点恢复和状态持久化
-	checkPointer *checkPointer
-	// 中断节点：在指定节点前/后中断图执行
+	// 检查点和中断
+	checkPointer         *checkPointer
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 
-	// 扇入合并配置：多输入节点的合并策略
+	// 扇入合并配置
 	mergeConfigs map[string]FanInMergeConfig
 }
 
-// invoke 图同步执行入口 - 同步模式调用图执行
-// 设计意图：为图提供同步执行接口，阻塞直到执行完成
-// 参数：
-//   - ctx: 上下文对象（支持取消和超时）
-//   - input: 图的输入数据
-//   - opts: 运行时选项（回调、中断控制等）
-//
-// 返回：
-//   - any: 图执行结果
-//   - error: 执行过程中的错误
+// ====== 执行入口 ======
+
+// invoke 同步执行图
 func (r *runner) invoke(ctx context.Context, input any, opts ...Option) (any, error) {
 	return r.run(ctx, false, input, opts...)
 }
 
-// transform 图流式执行入口 - 流模式调用图执行
-// 设计意图：为图提供流式执行接口，支持实时流式数据处理
-// 参数：
-//   - ctx: 上下文对象
-//   - input: 流式输入数据
-//   - opts: 运行时选项
-//
-// 返回：
-//   - streamReader: 流式输出数据
-//   - error: 执行错误
+// transform 流式执行图
 func (r *runner) transform(ctx context.Context, input streamReader, opts ...Option) (streamReader, error) {
 	s, err := r.run(ctx, true, input, opts...)
 	if err != nil {
@@ -157,40 +106,21 @@ func (r *runner) transform(ctx context.Context, input streamReader, opts ...Opti
 	return s.(streamReader), nil
 }
 
-// runnableCallWrapper 可执行对象调用包装器函数类型 - 统一同步和流式调用
-// 设计意图：根据执行模式选择合适的调用策略（同步或流式）
-// 参数：
-//   - ctx: 上下文对象
-//   - r: 可执行对象
-//   - input: 输入数据
-//   - opts: 可选参数
-//
-// 返回：
-//   - any: 执行结果
-//   - error: 执行错误
 type runnableCallWrapper func(context.Context, *composableRunnable, any, ...any) (any, error)
 
-// runnableInvoke 可执行对象同步调用函数 - 同步模式执行
 func runnableInvoke(ctx context.Context, r *composableRunnable, input any, opts ...any) (any, error) {
 	return r.i(ctx, input, opts...)
 }
 
-// runnableTransform 可执行对象流式调用函数 - 流模式执行
 func runnableTransform(ctx context.Context, r *composableRunnable, input any, opts ...any) (any, error) {
 	return r.t(ctx, input.(streamReader), opts...)
 }
 
-// run 图执行核心方法 - 统一同步和流式执行入口
-// 设计意图：封装图的完整执行生命周期，支持检查点恢复、中断控制和任务调度
-// 执行流程：
-//  1. 延迟初始化：等待状态生成器完成，确保 onGraphStart 可访问状态
-//  2. 执行管理器：初始化通道管理器和任务管理器
-//  3. 检查点恢复：从上下文或存储加载执行状态
-//  4. 主执行循环：任务提交→等待完成→计算后续任务
-//  5. 中断处理：支持优雅和强制中断，恢复和重试机制
-//  6. 生命周期回调：在 defer 中统一处理开始/错误/结束回调
+// ====== 核心执行循环 ======
+
+// run 图执行核心逻辑，统一处理同步和流式模式
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (result any, err error) {
-	haveOnStart := false // 延迟触发 onGraphStart，等待状态初始化完成，确保状态可在回调中访问
+	haveOnStart := false // delay triggering onGraphStart until state initialization is complete, so that the state can be accessed within onGraphStart.
 	defer func() {
 		if !haveOnStart {
 			ctx, input = onGraphStart(ctx, input, isStream)
@@ -202,19 +132,17 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		}
 	}()
 
-	// 执行模式选择：根据是否流式执行选择对应的调用包装器
 	var runWrapper runnableCallWrapper
 	runWrapper = runnableInvoke
 	if isStream {
 		runWrapper = runnableTransform
 	}
 
-	// 初始化执行管理器：创建通道管理器和任务管理器
+	// Initialize channel and task managers.
 	cm := r.initChannelManager(isStream)
 	tm := r.initTaskManager(runWrapper, getGraphCancel(ctx), opts...)
 	maxSteps := r.options.maxRunSteps
 
-	// 最大步数验证：DAG 模式不支持限制步数，Pregel 模式可选
 	if r.dag {
 		for i := range opts {
 			if opts[i].maxRunSteps > 0 {
@@ -222,7 +150,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			}
 		}
 	} else {
-		// 更新最大步数：运行时选项可覆盖编译时配置
+		// Update maxSteps if provided in options.
 		for i := range opts {
 			if opts[i].maxRunSteps > 0 {
 				maxSteps = opts[i].maxRunSteps
@@ -233,38 +161,37 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		}
 	}
 
-	// 提取节点选项：为每个节点分配对应的运行时选项
+	// Extract and validate options for each node.
 	optMap, extractErr := extractOption(r.chanSubscribeTo, opts...)
 	if extractErr != nil {
 		return nil, newGraphRunError(fmt.Errorf("graph extract option fail: %w", extractErr))
 	}
 
-	// 提取检查点信息：获取检查点 ID、状态修改器和执行控制参数
+	// Extract CheckPointID
 	checkPointID, writeToCheckPointID, stateModifier, forceNewRun := getCheckPointInfo(opts...)
 	if checkPointID != nil && r.checkPointer.store == nil {
 		return nil, newGraphRunError(fmt.Errorf("receive checkpoint id but have not set checkpoint store"))
 	}
 
-	// 提取子图信息：判断当前是否在子图执行，获取节点路径
+	// Extract subgraph
 	path, isSubGraph := getNodeKey(ctx)
 
-	// 检查点恢复或图初始化：根据执行上下文决定恢复或从头开始
+	// load checkpoint from ctx/store or init graph
 	initialized := false
 	var nextTasks []*task
 	if cp := getCheckPointFromCtx(ctx); cp != nil {
-		// 子图检查点：从上下文恢复执行状态
+		// in subgraph, try to load checkpoint from ctx
 		initialized = true
 		ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *path, getStateModifier(ctx), cp, isStream, cm, optMap)
 		ctx, input = onGraphStart(ctx, input, isStream)
 		haveOnStart = true
 	} else if checkPointID != nil && !forceNewRun {
-		// 外部检查点：从存储加载执行状态
 		cp, err = getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("load checkpoint from store fail: %w", err))
 		}
 		if cp != nil {
-			// 加载检查点并恢复执行
+			// load checkpoint from store
 			initialized = true
 
 			ctx = setStateModifier(ctx, stateModifier)
@@ -276,7 +203,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		}
 	}
 	if !initialized {
-		// 全新执行：未从检查点恢复，初始化图执行
+		// have not inited from checkpoint
 		if r.runCtx != nil {
 			ctx = r.runCtx(ctx)
 		}
@@ -300,7 +227,6 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, newGraphRunError(fmt.Errorf("no tasks to execute after graph start"))
 		}
 
-		// 检查起始中断：监控在指定节点前的中断信号
 		if keys := getHitKey(nextTasks, r.interruptBeforeNodes); len(keys) > 0 {
 			tempInfo := newInterruptTempInfo()
 			tempInfo.interruptBeforeNodes = append(tempInfo.interruptBeforeNodes, keys...)
@@ -315,29 +241,26 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		}
 	}
 
-	// 任务跟踪：记录最后完成的任务，用于无任务错误报告
+	// used to reporting NoTask error
 	var lastCompletedTask []*task
 
-	// 主执行循环：Pregel 风格的消息传递和迭代计算
+	// Main execution loop.
 	for step := 0; ; step++ {
-		// 上下文取消检查：监听执行取消信号
+		// Check for context cancellation.
 		select {
 		case <-ctx.Done():
 			_, _ = tm.waitAll()
 			return nil, newGraphRunError(fmt.Errorf("context has been canceled: %w", ctx.Err()))
 		default:
 		}
-		// 步数限制：Pregel 模式防止无限循环
 		if !r.dag && step >= maxSteps {
 			return nil, newGraphRunError(ErrExceedMaxSteps)
 		}
 
-		// 执行步骤：
-		//  1. 提交后续任务到任务池
-		//  2. 等待任务完成
-		//  3. 计算下一轮任务
+		// 1. submit next tasks
+		// 2. get completed tasks
+		// 3. calculate next tasks
 
-		// 步骤1：提交任务
 		err = tm.submit(nextTasks)
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("failed to submit tasks: %w", err))
@@ -345,54 +268,50 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 		var totalCanceledTasks []*task
 
-		// 步骤2：等待任务完成
 		completedTasks, canceled, canceledTasks := tm.wait()
 		totalCanceledTasks = append(totalCanceledTasks, canceledTasks...)
 		tempInfo := newInterruptTempInfo()
-		// 处理取消任务：区分重试节点和中断后节点
 		if canceled {
 			if len(canceledTasks) > 0 {
-				// 取消任务作为重试节点
+				// as rerun nodes
 				for _, t := range canceledTasks {
 					tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, t.nodeKey)
 				}
 			} else {
-				// 无取消任务，作为中断后节点处理
+				// as interrupt after
 				for _, t := range completedTasks {
 					tempInfo.interruptAfterNodes = append(tempInfo.interruptAfterNodes, t.nodeKey)
 				}
 			}
 		}
 
-		// 解析中断完成的任务：处理子图中断和重试错误
 		err = r.resolveInterruptCompletedTasks(tempInfo, completedTasks)
 		if err != nil {
-			return nil, err // 错误已包装
+			return nil, err // err has been wrapped
 		}
 
-		// 复杂中断处理：包含子图中断或重试节点
 		if len(tempInfo.subGraphInterrupts)+len(tempInfo.interruptRerunNodes) > 0 {
 			var newCompletedTasks []*task
 			newCompletedTasks, canceledTasks = tm.waitAll()
 			totalCanceledTasks = append(totalCanceledTasks, canceledTasks...)
 			for _, ct := range canceledTasks {
-				// 处理超时任务为重试
+				// handle timeout tasks as rerun
 				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, ct.nodeKey)
 			}
 
 			err = r.resolveInterruptCompletedTasks(tempInfo, newCompletedTasks)
 			if err != nil {
-				return nil, err // 错误已包装
+				return nil, err // err has been wrapped
 			}
 
-			// 子图中断处理：
-			// - 保存其他完成任务到通道
-			// - 将中断子图保存为带 SkipPreHandler 的后续任务
-			// - 报告当前图中断信息
+			// subgraph has interrupted
+			// save other completed tasks to channel
+			// save interrupted subgraph as next task with SkipPreHandler
+			// report current graph interrupt info
 			return nil, r.handleInterruptWithSubGraphAndRerunNodes(
 				ctx,
 				tempInfo,
-				append(append(completedTasks, newCompletedTasks...), totalCanceledTasks...), // 取消任务按重试处理
+				append(append(completedTasks, newCompletedTasks...), totalCanceledTasks...), // canceled tasks are handled as rerun
 				writeToCheckPointID,
 				isSubGraph,
 				cm,
@@ -400,13 +319,11 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			)
 		}
 
-		// 任务完成检查：无任务可执行时报告错误
 		if len(completedTasks) == 0 {
 			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, last completed nodes: %v", printTask(lastCompletedTask)))
 		}
 		lastCompletedTask = completedTasks
 
-		// 步骤3：计算下一轮任务
 		var isEnd bool
 		nextTasks, result, isEnd, err = r.calculateNextTasks(ctx, completedTasks, isStream, cm, optMap)
 		if err != nil {
@@ -416,10 +333,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return result, nil
 		}
 
-		// 检查后续中断：监控后续任务中的中断节点
 		tempInfo.interruptBeforeNodes = getHitKey(nextTasks, r.interruptBeforeNodes)
 
-		// 简单中断处理：处理节点前/后中断
 		if len(tempInfo.interruptBeforeNodes) > 0 || len(tempInfo.interruptAfterNodes) > 0 {
 			var newCompletedTasks []*task
 			newCompletedTasks, canceledTasks = tm.waitAll()
@@ -430,10 +345,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			err = r.resolveInterruptCompletedTasks(tempInfo, newCompletedTasks)
 			if err != nil {
-				return nil, err // 错误已包装
+				return nil, err // err has been wrapped
 			}
 
-			// 复杂中断：包含子图中断或重试节点
 			if len(tempInfo.subGraphInterrupts)+len(tempInfo.interruptRerunNodes) > 0 {
 				return nil, r.handleInterruptWithSubGraphAndRerunNodes(
 					ctx,
@@ -446,7 +360,6 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				)
 			}
 
-			// 重新计算中断后的任务
 			var newNextTasks []*task
 			newNextTasks, result, isEnd, err = r.calculateNextTasks(ctx, newCompletedTasks, isStream, cm, optMap)
 			if err != nil {
@@ -457,10 +370,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				return result, nil
 			}
 
-			// 合并中断前后节点列表
 			tempInfo.interruptBeforeNodes = append(tempInfo.interruptBeforeNodes, getHitKey(newNextTasks, r.interruptBeforeNodes)...)
 
-			// 简单中断：仅处理节点前/后中断
+			// simple interrupt
 			return nil, r.handleInterrupt(ctx, tempInfo, append(nextTasks, newNextTasks...), cm.channels, isStream, isSubGraph, writeToCheckPointID)
 		}
 	}
@@ -580,7 +492,7 @@ func (r *runner) handleInterrupt(
 		SkipPreHandler: map[string]bool{},
 	}
 	if r.runCtx != nil {
-		// 当前图具有启用状态
+		// current graph has enable state
 		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
 			cp.State = state.state
 		}
@@ -666,7 +578,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		SubGraphs:              make(map[string]*checkpoint),
 	}
 	if r.runCtx != nil {
-		// 当前图具有启用状态
+		// current graph has enable state
 		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
 			cp.State = state.state
 		}
@@ -706,15 +618,6 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	return &interruptError{Info: intInfo}
 }
 
-// calculateNextTasks 计算后续任务 - 执行循环的核心调度逻辑
-// 设计意图：根据已完成的任务，计算并准备下一轮需要执行的任务
-// 算法流程：
-//  1. 解析完成结果：提取任务输出数据和依赖关系
-//  2. 更新通道状态：通知下游节点数据就绪
-//  3. 检查终止条件：如果到达 END 节点，提前返回
-//  4. 创建新任务：为就绪节点生成执行任务
-//
-// 返回：(后续任务列表, 结果值, 是否结束, 错误)
 func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager, optMap map[string][]any) ([]*task, any, bool, error) {
 	writeChannelValues, controls, err := r.resolveCompletedTasks(ctx, completedTasks, isStream, cm)
 	if err != nil {
@@ -726,12 +629,12 @@ func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task,
 	}
 	var nextTasks []*task
 	if len(nodeMap) > 0 {
-		// 检查是否到达 END 节点（终止条件）
+		// Check if we've reached the END node.
 		if v, ok := nodeMap[END]; ok {
 			return nil, v, true, nil
 		}
 
-		// 创建下一批待执行任务
+		// Create and submit the next batch of tasks.
 		nextTasks, err = r.createTasks(ctx, nodeMap, optMap)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("failed to create tasks: %w", err)
@@ -833,15 +736,6 @@ func (r *runner) restoreTasks(
 	return ret, nil
 }
 
-// resolveCompletedTasks 解析已完成任务 - 提取输出数据和更新依赖关系
-// 设计意图：将已完成任务的结果传播给下游节点，并更新执行依赖图
-// 算法流程：
-//  1. 控制依赖更新：为每个控制边添加依赖关系
-//  2. 分支计算：执行条件分支，确定后续节点路径
-//  3. 数据复制：多后继节点时复制数据，确保每个节点有独立输入
-//  4. 通道更新：准备写入下游节点的数据映射
-//
-// 返回：(节点输入数据映射, 新依赖关系映射, 错误)
 func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager) (map[string]map[string]any, map[string][]string, error) {
 	writeChannelValues := make(map[string]map[string]any)
 	newDependencies := make(map[string][]string)
@@ -850,7 +744,7 @@ func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*ta
 			newDependencies[key] = append(newDependencies[key], t.nodeKey)
 		}
 
-		// 更新通道数据和新任务计算
+		// update channel & new_next_tasks
 		vs := copyItem(t.output, len(t.call.writeTo)+len(t.call.writeToBranches)*2)
 		nextNodeKeys, err := r.calculateBranch(ctx, t.nodeKey, t.call,
 			vs[len(t.call.writeTo)+len(t.call.writeToBranches):], isStream, cm)
@@ -863,7 +757,7 @@ func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*ta
 		}
 		nextNodeKeys = append(nextNodeKeys, t.call.writeTo...)
 
-		// 分支生成多个后继时，需相应复制输入数据
+		// If branches generates more than one successor, the inputs need to be copied accordingly.
 		if len(nextNodeKeys) > 0 {
 			toCopyNum := len(nextNodeKeys) - len(t.call.writeTo) - len(t.call.writeToBranches)
 			nVs := copyItem(vs[len(t.call.writeTo)+len(t.call.writeToBranches)-1], toCopyNum+1)
@@ -880,19 +774,9 @@ func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*ta
 	return writeChannelValues, newDependencies, nil
 }
 
-// calculateBranch 计算分支路径 - 条件分支的路径选择算法
-// 设计意图：执行条件分支逻辑，确定哪些后续节点被选中执行
-// 算法流程：
-//  1. 分支预处理：应用分支前置处理器（类型转换等）
-//  2. 条件执行：执行每个分支的条件判断函数（同步或流式）
-//  3. 路径收集：收集被选中的后续节点路径
-//  4. 跳过节点：检测被所有分支跳过的节点
-//  5. 去重处理：避免被部分分支选中但被其他分支跳过的节点被错误跳过
-//
-// 返回：选中的后续节点键列表
 func (r *runner) calculateBranch(ctx context.Context, curNodeKey string, startChan *chanCall, input []any, isStream bool, cm *channelManager) ([]string, error) {
 	if len(input) < len(startChan.writeToBranches) {
-		// 不可达：输入长度不足
+		// unreachable
 		return nil, errors.New("calculate next input length is shorter than branches")
 	}
 
@@ -900,14 +784,14 @@ func (r *runner) calculateBranch(ctx context.Context, curNodeKey string, startCh
 
 	skippedNodes := make(map[string]struct{})
 	for i, branch := range startChan.writeToBranches {
-		// 检查分支输入类型
+		// check branch input type if needed
 		var err error
 		input[i], err = r.preBranchHandlerManager.handle(curNodeKey, i, input[i], isStream)
 		if err != nil {
 			return nil, fmt.Errorf("branch[%s]-[%d] pre handler fail: %w", curNodeKey, branch.idx, err)
 		}
 
-		// 处理分支输出
+		// process branch output
 		var ws []string
 		if isStream {
 			ws, err = branch.collect(ctx, input[i].(streamReader))
@@ -921,7 +805,6 @@ func (r *runner) calculateBranch(ctx context.Context, curNodeKey string, startCh
 			}
 		}
 
-		// 标记被跳过的节点
 		for node := range branch.endNodes {
 			skipped := true
 			for _, w := range ws {
@@ -938,9 +821,9 @@ func (r *runner) calculateBranch(ctx context.Context, curNodeKey string, startCh
 		ret = append(ret, ws...)
 	}
 
-	// 多分支场景优化：
-	// 当节点有多个分支时，可能出现某些后续节点被部分分支选中而被其他分支跳过的情况
-	// 此时该节点不应该被跳过
+	// When a node has multiple branches,
+	// there may be a situation where a succeeding node is selected by some branches and discarded by the other branches,
+	// in which case the succeeding node should not be skipped.
 	var skippedNodeList []string
 	for _, selected := range ret {
 		if _, ok := skippedNodes[selected]; ok {
@@ -972,14 +855,6 @@ func (r *runner) initTaskManager(runWrapper runnableCallWrapper, cancelVal *grap
 	return tm
 }
 
-// initChannelManager 初始化通道管理器 - 构建节点间通信通道
-// 设计意图：为每个节点创建独立的通信通道，支持 Pregel/DAG 两种构建策略
-// 构建流程：
-//  1. 策略选择：根据图类型选择通道构建器（默认 Pregel）
-//  2. 节点通道：为每个节点创建通信通道，注入零值和空流工厂
-//  3. END通道：为终止节点创建特殊通道
-//  4. 依赖转换：将依赖列表转换为集合结构以提升查找性能
-//  5. 合并配置：为多输入节点应用扇入合并策略
 func (r *runner) initChannelManager(isStream bool) *channelManager {
 	builder := r.chanBuilder
 	if builder == nil {
@@ -1026,13 +901,6 @@ func (r *runner) initChannelManager(isStream bool) *channelManager {
 	}
 }
 
-// toComposableRunnable 转换为可执行对象 - 实现接口适配
-// 设计意图：将 runner 适配为 composableRunnable，实现统一的可执行接口
-// 适配内容：
-//   - i 字段：同步执行接口，转换参数并调用 runner.invoke
-//   - t 字段：流式执行接口，转换参数并调用 runner.transform
-//   - 类型系统：继承输入输出类型和通用辅助系统
-//   - 选项透传：optionType 为 nil，支持所有选项透传
 func (r *runner) toComposableRunnable() *composableRunnable {
 	cr := &composableRunnable{
 		i: func(ctx context.Context, input any, opts ...any) (output any, err error) {
@@ -1053,21 +921,12 @@ func (r *runner) toComposableRunnable() *composableRunnable {
 		inputType:     r.inputType,
 		outputType:    r.outputType,
 		genericHelper: r.genericHelper,
-		optionType:    nil, // 选项类型为 nil，图将透传所有选项
+		optionType:    nil, // if option type is nil, graph will transmit all options.
 	}
 
 	return cr
 }
 
-// copyItem 将一个 item 复制 n 次，返回包含 n 个元素的切片
-//
-// 特殊处理逻辑：
-//  1. 当 n < 2 时，直接返回包含该 item 的单元素切片，避免不必要的复制
-//  2. 当 item 实现 streamReader 接口时，调用其专门的 copy 方法进行深拷贝，
-//     确保流状态的正确复制
-//  3. 对于普通对象，直接将同一个引用填充到切片的每个位置
-//
-// 这种设计既保证了流对象的正确复制，又避免了对普通对象的过度复制开销
 func copyItem(item any, n int) []any {
 	if n < 2 {
 		return []any{item}
@@ -1090,18 +949,6 @@ func copyItem(item any, n int) []any {
 	return ret
 }
 
-// printTask 任务切片格式化函数 - 将任务列表转换为可读字符串
-// 设计意图：为调试和日志输出提供标准化的任务列表字符串表示
-// 格式化规则：
-//  1. 空列表返回 "[]"，表示无任务
-//  2. 非空列表格式为 "[node1, node2, ..., nodeN]"
-//  3. 使用 strings.Builder 优化字符串拼接性能
-//  4. 提取每个任务的 nodeKey 作为标识符
-//
-// 应用场景：
-//   - 调试时打印任务执行进度
-//   - 错误信息中报告当前任务状态
-//   - 日志记录任务流程追踪
 func printTask(ts []*task) string {
 	if len(ts) == 0 {
 		return "[]"
