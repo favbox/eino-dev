@@ -1,12 +1,15 @@
 <component name="ProjectDictionaryState">
   <dictionary name="project">
     <words>
+      <w>chatmodel</w>
+      <w>ctxs</w>
       <w>favbox</w>
       <w>logprob</w>
       <w>missingkey</w>
       <w>probs</w>
       <w>pyfmt</w>
       <w>recv</w>
+      <w>runctx</w>
       <w>vectorstore</w>
       <w>vikingdb</w>
     </words>
