@@ -71,18 +71,6 @@ type AgentConfig struct {
 	ToolsNodeName string
 }
 
-// NewPersonaModifier 创建角色修饰器。
-// 已废弃：不推荐使用，建议直接在输入消息中包含角色定义。
-func NewPersonaModifier(persona string) MessageModifier {
-	return func(ctx context.Context, input []*schema.Message) []*schema.Message {
-		res := make([]*schema.Message, 0, len(input)+1)
-
-		res = append(res, schema.SystemMessage(persona))
-		res = append(res, input...)
-		return res
-	}
-}
-
 // firstChunkStreamToolCallChecker 检查首个流式分块中是否包含工具调用。
 func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
 	defer sr.Close()

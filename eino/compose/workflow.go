@@ -1,5 +1,29 @@
 package compose
 
+/*
+ * workflow.go - 工作流构建器实现
+ *
+ * 核心组件：
+ *   - Workflow: 工作流构建器，替代 AddEdge 提供声明式依赖管理
+ *   - WorkflowNode: 工作流节点，支持字段映射和依赖配置
+ *   - WorkflowBranch: 工作流分支，支持条件执行路径
+ *
+ * 设计特点：
+ *   - 声明式依赖管理：通过 AddInput 声明数据流和执行依赖
+ *   - 字段级映射：支持精细的字段映射而非整对象传递
+ *   - 内部使用 NodeTriggerMode(AllPredecessor)，不支持循环
+ *   - 支持静态值设置和分支条件执行
+ *
+ * 依赖类型：
+ *   - normalDependency: 正常依赖（数据+执行）
+ *   - noDirectDependency: 无直接依赖（仅数据流）
+ *   - branchDependency: 分支依赖
+ *
+ * 与其他文件关系：
+ *   - 内部使用 graph.go 的图构建能力
+ *   - 与 field_mapping.go 协同实现字段映射
+ *   - 为用户提供了更友好的工作流构建接口
+ */
 import (
 	"context"
 	"fmt"
@@ -14,76 +38,45 @@ import (
 	"github.com/favbox/eino/schema"
 )
 
-/*
- * workflow.go - 工作流模式实现
- *
- * 核心组件：
- *   - WorkflowNode: 工作流节点，支持依赖声明和字段映射
- *   - Workflow: 基于泛型的工作流构建器，封装 Graph 实现
- *   - dependencyType: 三种依赖类型（普通/非直接/分支）
- *   - WorkflowBranch: 工作流分支封装
- *
- * 设计特点：
- *   - 字段级映射：支持精细到字段级别的数据流控制
- *   - 依赖分离：将执行依赖与数据依赖解耦
- *   - 链式构建：支持方法链式调用
- *   - 编译优化：构建时验证依赖合法性
- *
- * 与其他文件关系：
- *   - 封装 generic_graph.go 的 Graph 实现
- *   - 集成 field_mapping.go 的字段映射系统
- *   - 提供比 Chain 更高层次的编排能力
- *
- * 使用场景：
- *   - 精细化数据流控制：仅传递需要的字段
- *   - 复杂依赖管理：独立配置执行顺序和数据流向
- *   - 可视化编排：清晰的依赖声明式构建
- */
+// ====== 工作流节点定义 ======
 
-// ====== Workflow 节点定义 ======
-
-// WorkflowNode 工作流节点 - 支持依赖声明和字段映射的节点
-// 每个节点可独立配置数据来源和执行顺序，支持静态值和字段映射
+// WorkflowNode 工作流节点，封装节点配置和依赖关系
 type WorkflowNode struct {
-	g                *graph
-	key              string
-	addInputs        []func() error
-	staticValues     map[string]any
-	dependencySetter func(fromNodeKey string, typ dependencyType)
-	mappedFieldPath  map[string]any
+	// 节点配置
+	g                *graph                                       // 所属图实例
+	key              string                                       // 节点键标识
+	addInputs        []func() error                               // 输入添加函数列表
+	staticValues     map[string]any                               // 静态值映射
+	dependencySetter func(fromNodeKey string, typ dependencyType) // 依赖设置函数
+	mappedFieldPath  map[string]any                               // 字段路径映射
 }
 
-// ====== Workflow 定义 ======
+// ====== 工作流定义 ======
 
-// Workflow 工作流构建器 - 替代 AddEdge 的声明式依赖管理
-// 基于 NodeTriggerMode(AllPredecessor)，不支持循环
-// 支持三种依赖类型：普通依赖、非直接依赖、分支依赖
+// Workflow 工作流构建器，封装图并提供声明式依赖管理
+// 内部使用 NodeTriggerMode(AllPredecessor)，不支持循环
 type Workflow[I, O any] struct {
-	g                *graph
-	workflowNodes    map[string]*WorkflowNode
-	workflowBranches []*WorkflowBranch
-	dependencies     map[string]map[string]dependencyType
+	// 工作流状态
+	g                *graph                               // 底层图实例
+	workflowNodes    map[string]*WorkflowNode             // 工作流节点映射
+	workflowBranches []*WorkflowBranch                    // 工作流分支列表
+	dependencies     map[string]map[string]dependencyType // 依赖关系映射
 }
 
 // ====== 依赖类型定义 ======
 
-// dependencyType 依赖类型枚举 - 定义节点间的依赖关系
+// dependencyType 依赖类型枚举
 type dependencyType int
 
 const (
-	// normalDependency 普通依赖 - 同时建立数据和执行依赖
-	normalDependency dependencyType = iota
-
-	// noDirectDependency 非直接依赖 - 仅建立数据映射，不建立直接执行依赖
-	noDirectDependency
-
-	// branchDependency 分支依赖 - 来自分支结构的依赖
-	branchDependency
+	normalDependency   dependencyType = iota // 正常依赖（数据+执行）
+	noDirectDependency                       // 无直接依赖（仅数据流）
+	branchDependency                         // 分支依赖
 )
 
 // ====== Workflow 工厂方法 ======
 
-// NewWorkflow 创建工作流实例 - 支持泛型输入输出类型
+// NewWorkflow 创建新的工作流实例
 func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
 	options := &newGraphOptions{}
 	for _, opt := range opts {
@@ -109,7 +102,7 @@ func (wf *Workflow[I, O]) Compile(ctx context.Context, opts ...GraphCompileOptio
 	return compileAnyGraph[I, O](ctx, wf, opts...)
 }
 
-// ====== Workflow 节点添加方法族 ======
+// ====== 节点添加方法 ======
 
 // AddChatModelNode 添加聊天模型节点
 func (wf *Workflow[I, O]) AddChatModelNode(key string, chatModel model.BaseChatModel, opts ...GraphAddNodeOpt) *WorkflowNode {
@@ -159,7 +152,7 @@ func (wf *Workflow[I, O]) AddDocumentTransformerNode(key string, transformer doc
 	return wf.initNode(key)
 }
 
-// AddGraphNode 添加图节点（支持链或图）
+// AddGraphNode 添加子图节点
 func (wf *Workflow[I, O]) AddGraphNode(key string, graph AnyGraph, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddGraphNode(key, graph, opts...)
 	return wf.initNode(key)
@@ -171,7 +164,7 @@ func (wf *Workflow[I, O]) AddLambdaNode(key string, lambda *Lambda, opts ...Grap
 	return wf.initNode(key)
 }
 
-// End 获取 END 节点 - 用于连接工作流结束
+// End 获取终止节点
 func (wf *Workflow[I, O]) End() *WorkflowNode {
 	if node, ok := wf.workflowNodes[END]; ok {
 		return node
@@ -179,37 +172,32 @@ func (wf *Workflow[I, O]) End() *WorkflowNode {
 	return wf.initNode(END)
 }
 
-// AddPassthroughNode 添加直通节点
+// AddPassthroughNode 添加透传节点
 func (wf *Workflow[I, O]) AddPassthroughNode(key string, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddPassthroughNode(key, opts...)
 	return wf.initNode(key)
 }
 
-// ====== WorkflowNode 依赖管理方法 ======
+// ====== 输入和依赖管理 ======
 
-// AddInput 添加节点依赖 - 同时建立数据依赖和执行依赖
-// 配置数据从前置节点到当前节点的流向，确保当前节点在前置节点完成后才执行
-// 参数:
+// AddInput 添加输入依赖，建立数据流和执行依赖关系
+// 参数：
 //   - fromNodeKey: 前置节点键
-//   - inputs: 字段映射列表，指定数据流向；为空时使用整个前置输出
-//
-// 示例:
+//   - inputs: 字段映射列表，指定数据流方式
 func (n *WorkflowNode) AddInput(fromNodeKey string, inputs ...*FieldMapping) *WorkflowNode {
 	return n.addDependencyRelation(fromNodeKey, inputs, &workflowAddInputOpts{})
 }
 
-// workflowAddInputOpts 依赖添加选项 - 控制依赖建立的细节
+// workflowAddInputOpts 输入添加选项配置
 type workflowAddInputOpts struct {
-	// noDirectDependency 非直接依赖 - 仅建立数据映射，不建立直接执行依赖
-	noDirectDependency bool
-	// dependencyWithoutInput 纯执行依赖 - 仅建立执行依赖，不进行数据映射
-	dependencyWithoutInput bool
+	noDirectDependency     bool // 无直接依赖：仅数据流，无执行依赖
+	dependencyWithoutInput bool // 无输入依赖：仅执行依赖，无数据流
 }
 
-// WorkflowAddInputOpt 依赖添加选项函数类型
+// WorkflowAddInputOpt 输入添加选项函数类型
 type WorkflowAddInputOpt func(*workflowAddInputOpts)
 
-// getAddInputOpts 解析依赖添加选项
+// getAddInputOpts 获取输入添加选项
 func getAddInputOpts(opts []WorkflowAddInputOpt) *workflowAddInputOpts {
 	opt := &workflowAddInputOpts{}
 	for _, o := range opts {
@@ -218,38 +206,27 @@ func getAddInputOpts(opts []WorkflowAddInputOpt) *workflowAddInputOpts {
 	return opt
 }
 
-// WithNoDirectDependency 非直接依赖选项 - 分离执行依赖与数据依赖
-// 前置节点仍会在当前节点前完成，但通过间接路径而非直接依赖
-// 设计原理：
-//  1. 节点依赖有两个目的：执行顺序和数据流
-//  2. 此选项将两者分离：建立数据映射，但执行顺序通过其他节点间接保证
-//
-// 重要使用场景：
-//   - 分支场景：连接分支两侧的节点时必须使用，避免绕过分支的错误依赖
-//   - 避免冗余依赖：当已存在路径时，使用间接依赖减少复杂度
+// WithNoDirectDependency 创建无直接依赖的选项
+// 作用：仅建立数据流依赖，不建立直接执行依赖
 func WithNoDirectDependency() WorkflowAddInputOpt {
 	return func(opt *workflowAddInputOpts) {
 		opt.noDirectDependency = true
 	}
 }
 
-// AddInputWithOptions 添加节点依赖（自定义选项）- 精细化控制依赖关系
+// AddInputWithOptions 添加带选项的输入依赖
 func (n *WorkflowNode) AddInputWithOptions(fromNodeKey string, inputs []*FieldMapping, opts ...WorkflowAddInputOpt) *WorkflowNode {
 	return n.addDependencyRelation(fromNodeKey, inputs, getAddInputOpts(opts))
 }
 
-// AddDependency 添加执行依赖 - 仅建立执行顺序，不传递数据
-// 当前节点等待前置节点完成，但不接收其数据
-// 使用场景：
-//   - 初始化依赖：前置节点执行setup，后置节点等待完成后开始
-//   - 状态同步：确保执行顺序，但无数据传递
+// AddDependency 添加执行依赖（无数据流）
+// 作用：仅建立执行依赖，不传递数据
 func (n *WorkflowNode) AddDependency(fromNodeKey string) *WorkflowNode {
 	return n.addDependencyRelation(fromNodeKey, nil, &workflowAddInputOpts{dependencyWithoutInput: true})
 }
 
-// SetStaticValue 设置静态值 - 编译期确定的常量值
-// 整个工作流生命周期内保持不变
-// 示例：设置固定查询参数、配置值等
+// SetStaticValue 设置静态值
+// 作用：为字段路径设置编译时确定的静态值
 func (n *WorkflowNode) SetStaticValue(path FieldPath, value any) *WorkflowNode {
 	n.staticValues[path.join()] = value
 	return n
@@ -367,14 +344,16 @@ func (n *WorkflowNode) checkAndAddMappedPath(paths []FieldPath) error {
 
 // ====== 分支处理 ======
 
-// WorkflowBranch 工作流分支 - 封装 GraphBranch 并记录源节点
+// WorkflowBranch 工作流分支，封装分支信息和源节点
 type WorkflowBranch struct {
-	fromNodeKey string
-	*GraphBranch
+	fromNodeKey  string // 源节点键
+	*GraphBranch        // 分支信息
 }
 
-// AddBranch 添加工作流分支 - 与 Graph 分支的关键区别
-// Workflow 分支不会自动传递输入给选中的节点，需要显式定义字段映射
+// AddBranch 添加分支到工作流
+// 注意：工作流分支与图分支的重要区别：
+//   - 图分支：自动将输入传递给选中的节点
+//   - 工作流分支：不自动传递输入，需节点自己定义字段映射
 func (wf *Workflow[I, O]) AddBranch(fromNodeKey string, branch *GraphBranch) *WorkflowBranch {
 	wb := &WorkflowBranch{
 		fromNodeKey: fromNodeKey,
@@ -385,19 +364,9 @@ func (wf *Workflow[I, O]) AddBranch(fromNodeKey string, branch *GraphBranch) *Wo
 	return wb
 }
 
-// AddEnd 连接 END 节点 - 已弃用，建议使用 End() 方法
-// 使用 *Workflow[I,O].End() 获取 WorkflowNode 实例进行连接
-func (wf *Workflow[I, O]) AddEnd(fromNodeKey string, inputs ...*FieldMapping) *Workflow[I, O] {
-	for _, input := range inputs {
-		input.fromNodeKey = fromNodeKey
-	}
-	_ = wf.g.addEdgeWithMappings(fromNodeKey, END, false, false, inputs...)
-	return wf
-}
+// ====== 编译和初始化 ======
 
-// ====== 编译逻辑 ======
-
-// compile 编译工作流为可执行对象 - 处理依赖、字段映射和静态值
+// compile 编译工作流为可执行对象
 func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOptions) (*composableRunnable, error) {
 	// 构建错误检查：返回构建时累积的错误
 	if wf.g.buildError != nil {
@@ -483,9 +452,7 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 	return wf.g.compile(ctx, options)
 }
 
-// ====== 内部辅助方法 ======
-
-// initNode 初始化工作流节点 - 创建节点并设置依赖设置器
+// initNode 初始化工作流节点
 func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
 	n := &WorkflowNode{
 		g:            wf.g,
@@ -504,20 +471,22 @@ func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
 	return n
 }
 
-// ====== AnyGraph 接口实现 ======
-
+// getGenericHelper 获取泛型辅助对象
 func (wf *Workflow[I, O]) getGenericHelper() *genericHelper {
 	return wf.g.getGenericHelper()
 }
 
+// inputType 获取输入类型
 func (wf *Workflow[I, O]) inputType() reflect.Type {
 	return wf.g.inputType()
 }
 
+// outputType 获取输出类型
 func (wf *Workflow[I, O]) outputType() reflect.Type {
 	return wf.g.outputType()
 }
 
+// component 获取组件类型
 func (wf *Workflow[I, O]) component() component {
 	return wf.g.component()
 }

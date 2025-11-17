@@ -23,12 +23,6 @@ func WithChatModelOptions(opts ...model.Option) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithChatModelOption(opts...))
 }
 
-// WithToolList 配置工具节点的工具列表
-// 已废弃：推荐使用 WithTools，它会同时配置模型和工具节点
-func WithToolList(tools ...tool.BaseTool) agent.AgentOption {
-	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
-}
-
 // WithTools 为 ReAct 智能体配置工具列表
 // 同时配置聊天模型的工具信息和工具节点的实际实现
 // 返回必须同时应用的 2 个选项

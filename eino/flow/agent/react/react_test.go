@@ -53,7 +53,7 @@ func TestReact(t *testing.T) {
 
 			return schema.AssistantMessage("bye", nil), nil
 		}).AnyTimes()
-	cm.EXPECT().WithTools(gomock.Any()).Return(nil).AnyTimes()
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
 
 	a, err := NewAgent(ctx, &AgentConfig{
 		ToolCallingModel: cm,

@@ -10,7 +10,7 @@ import (
 )
 
 /*
- * graph_node.go - Graph 节点定义与编译
+ * graph_node.go - Graph 节点定义与编译。
  *
  * 核心组件：
  *   - executorMeta: 执行器元数据，记录组件类型和回调能力

@@ -1,7 +1,7 @@
 package compose
 
 /*
- * graph_run.go - Graph 执行引擎实现
+ * graph_run.go - Graph 执行引擎实现。
  *
  * 核心组件：
  *   - runner: 图执行器，封装执行状态和调度逻辑

@@ -73,7 +73,7 @@ type ParameterInfo struct {
 	Required bool
 }
 
-// ParamsOneOf - 工具参数描述的联合类型，支持三种描述方式（必须选择其中一种）
+// ParamsOneOf - 工具参数描述的联合类型，支持两种描述方式（必须选择其中一种）
 //  1. 简单描述：使用 NewParamsOneOfByParams() - 适合快速原型开发
 //  2. 复杂描述：使用 NewParamsOneOfByJSONSchema() - 通用标准（跨系统集成）的 JSON 描述
 type ParamsOneOf struct {

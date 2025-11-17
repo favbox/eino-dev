@@ -14,7 +14,7 @@ import (
 
 // ====== 字段映射定义 ======
 
-// FieldMapping 字段映射定义，描述源字段到目标字段的映射关系
+// FieldMapping 字段映射定义，描述源字段到目标字段的映射关系。
 type FieldMapping struct {
 	fromNodeKey     string
 	from            string

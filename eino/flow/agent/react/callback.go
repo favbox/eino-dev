@@ -5,8 +5,7 @@ import (
 	template "github.com/favbox/eino/utils/callbacks"
 )
 
-// BuildAgentCallback 构建智能体回调处理器。
-// 将模型回调处理器和工具回调处理器组合为完整的智能体回调。
+// BuildAgentCallback 组合模型和工具的回调处理器。
 //
 // 使用示例：
 //
