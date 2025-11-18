@@ -266,7 +266,8 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 				event.Output.MessageOutput != nil &&
 				event.Output.MessageOutput.Role == schema.Tool &&
 				len(historyEntries) > 0 {
-				// 如果跳过的消息角色是 Tool，移除前一个历史记录项，因为它也是转移消息（来自 ChatModelAgent 和 GenTransferMessages）
+				// 如果跳过的消息角色是 Tool，移除前一个历史记录项，因为它也是转移消息（来自
+				// 和 GenTransferMessages）
 				historyEntries = historyEntries[:len(historyEntries)-1]
 			}
 			continue
