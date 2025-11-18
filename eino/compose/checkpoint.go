@@ -79,23 +79,6 @@ func WithSerializer(serializer Serializer) GraphCompileOption {
 	}
 }
 
-// Deprecated: you won't need to call RegisterInternalType anymore.
-func RegisterInternalType(f func(key string, value any) error) error {
-	err := f("_eino_checkpoint", &checkpoint{})
-	if err != nil {
-		return err
-	}
-	err = f("_eino_dag_channel", &dagChannel{})
-	if err != nil {
-		return err
-	}
-	err = f("_eino_pregel_channel", &pregelChannel{})
-	if err != nil {
-		return err
-	}
-	return f("_eino_dependency_state", dependencyState(0))
-}
-
 // WithCheckPointID 设置检查点ID - 用于标识检查点
 func WithCheckPointID(checkPointID string) Option {
 	return Option{

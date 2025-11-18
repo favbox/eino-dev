@@ -1,3 +1,27 @@
+/*
+ * message.go - 消息模式定义，支持文本和多模态内容
+ *
+ * 核心组件：
+ *   - Message: 消息结构，支持文本和多模态内容的输入输出
+ *   - MessageInputPart/MessageOutputPart: 多模态内容部分（图片、音频、视频、文件）
+ *   - ToolCall: 工具调用信息，用于智能体和工具交互
+ *   - MessagesTemplate: 消息模板接口，支持多种格式化方式
+ *
+ * 设计特点：
+ *   - 多模态支持: 统一处理文本、图片、音频、视频、文件等多种内容类型
+ *   - 角色系统: 支持 User、Assistant、System、Tool 四种消息角色
+ *   - 工具调用: 完整的工具调用和响应机制
+ *   - 流式合并: 支持流式消息块的自动合并
+ *   - 模板格式化: 支持 FString、GoTemplate、Jinja2 三种模板格式
+ *   - RFC-2397 支持: 支持内联数据 URL（data URI）
+ *
+ * 使用场景：
+ *   - 纯文本对话: 使用 Content 字段
+ *   - 多模态输入: 使用 UserInputMultiContent 字段
+ *   - 多模态输出: 使用 AssistantGenMultiContent 字段
+ *   - 工具调用: 使用 ToolCalls 和 ToolCallID 字段
+ */
+
 package schema
 
 import (
@@ -65,324 +89,231 @@ func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
 	return ret, nil
 }
 
-// FormatType 消息模板的格式化类型。
+// FormatType 定义消息模板的格式化类型
 type FormatType uint8
 
 const (
-	// FString Python 风格的字符串格式化 (PEP-3101)。
-	// 由 pyfmt 库实现。
+	// FString 是 Python f-string 格式，由 pyfmt 实现（PEP-3101）
 	FString FormatType = 0
 	// GoTemplate Go 标准库的 text/template 格式化。
 	GoTemplate FormatType = 1
-	// Jinja2 Jinja2 模板格式化。
-	// 由 gonja 库实现。
+	// Jinja2 是 Jinja2 模板格式，由 gonja 实现
 	Jinja2 FormatType = 2
 )
 
-// RoleType 消息角色类型。
+// RoleType 定义消息的角色类型
 type RoleType string
 
 const (
-	// Assistant 助手角色，表示消息由聊天模型返回。
+	// Assistant 表示助手角色，消息由 ChatModel 返回
 	Assistant RoleType = "assistant"
-	// User 用户角色，表示消息来自用户输入。
+	// User 表示用户角色，消息来自用户输入
 	User RoleType = "user"
-	// System 系统角色，表示消息为系统消息。
+	// System 表示系统角色，消息为系统提示词
 	System RoleType = "system"
-	// Tool 工具角色，表示消息为工具调用输出。
+	// Tool 表示工具角色，消息为工具调用输出
 	Tool RoleType = "tool"
 )
 
-// FunctionCall 消息中的函数调用信息。
-// 用于 Assistant 消息中的工具调用。
+// FunctionCall 表示消息中的函数调用信息。
+// 用于 Assistant 消息，指示需要调用的函数和参数。
 type FunctionCall struct {
-	// Name 函数名称，用于标识具体的函数。
+	// Name 是要调用的函数名称，用于标识特定函数
 	Name string `json:"name,omitempty"`
-	// Arguments 函数参数，JSON 格式字符串。
+	// Arguments 是调用函数的参数，JSON 格式字符串
 	Arguments string `json:"arguments,omitempty"`
 }
 
-// ToolCall 消息中的工具调用信息。
-// 用于 Assistant 消息中需要调用工具的场景。
+// ToolCall 表示消息中的工具调用信息。
+// 用于 Assistant 消息，指示需要进行的工具调用。
 type ToolCall struct {
-	// Index 工具调用索引，用于多工具调用场景。
-	// 流式模式下用于标识分块以便合并。
+	// Index 用于消息中有多个工具调用时的索引标识。
+	// 流式模式下用于识别工具调用的数据块以便合并。
 	Index *int `json:"index,omitempty"`
-	// ID 工具调用的唯一标识符。
+	// ID 是工具调用的唯一标识符
 	ID string `json:"id"`
-	// Type 工具调用类型。
-	// 默认值："function"。
+	// Type 是工具调用类型，默认为 "function"
 	Type string `json:"type"`
-	// Function 要调用的函数信息。
+	// Function 是要执行的函数调用
 	Function FunctionCall `json:"function"`
 
-	// Extra 额外信息存储。
+	// Extra 存储工具调用的额外信息
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// ImageURLDetail 图像 URL 的质量级别。
+// ImageURLDetail 定义图片 URL 的质量级别
 type ImageURLDetail string
 
 const (
-	// ImageURLDetailHigh 高质量图像。
+	// ImageURLDetailHigh 表示高质量图片
 	ImageURLDetailHigh ImageURLDetail = "high"
-	// ImageURLDetailLow 低质量图像。
+	// ImageURLDetailLow 表示低质量图片
 	ImageURLDetailLow ImageURLDetail = "low"
-	// ImageURLDetailAuto 自动选择质量。
+	// ImageURLDetailAuto 表示自动选择质量
 	ImageURLDetailAuto ImageURLDetail = "auto"
 )
 
-// MessagePartCommon 多模态类型的通用抽象组件。
-// 用于输入和输出的统一表示。
+// MessagePartCommon 表示多模态内容的通用组件。
+// 提供 URL 和 Base64 两种数据表示方式。
 type MessagePartCommon struct {
-	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
-	// 具体使用方式请参考模型实现的文档。
+	// URL 可以是传统 URL 或符合 RFC-2397 的 data URI。
+	// 具体用法请参考模型实现的文档。
 	URL *string `json:"url,omitempty"`
 
-	// Base64Data Base64 编码的二进制数据。
+	// Base64Data 表示 Base64 编码的二进制数据
 	Base64Data *string `json:"base64data,omitempty"`
 
-	// MIMEType MIME 类型，例如 "image/png"、"audio/wav"。
+	// MIMEType 是 MIME 类型，如 "image/png"、"audio/wav" 等
 	MIMEType string `json:"mime_type,omitempty"`
 
-	// Extra 额外信息存储。
+	// Extra 存储额外信息
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// MessageInputImage 消息中的图像输入部分。
-// 可选择使用 URL 或 Base64Data。
+// MessageInputImage 表示消息中的图片输入部分。
+// URL 和 Base64Data 二选一。
 type MessageInputImage struct {
 	MessagePartCommon
 
-	// Detail 图像质量级别。
+	// Detail 是图片的质量级别
 	Detail ImageURLDetail `json:"detail,omitempty"`
 }
 
-// MessageInputAudio 消息中的音频输入部分。
-// 可选择使用 URL 或 Base64Data。
+// MessageInputAudio 表示消息中的音频输入部分。
+// URL 和 Base64Data 二选一。
 type MessageInputAudio struct {
 	MessagePartCommon
 }
 
-// MessageInputVideo 消息中的视频输入部分。
-// 可选择使用 URL 或 Base64Data。
+// MessageInputVideo 表示消息中的视频输入部分。
+// URL 和 Base64Data 二选一。
 type MessageInputVideo struct {
 	MessagePartCommon
 }
 
-// MessageInputFile 消息中的文件输入部分。
-// 可选择使用 URL 或 Base64Data。
+// MessageInputFile 表示消息中的文件输入部分。
+// URL 和 Base64Data 二选一。
 type MessageInputFile struct {
 	MessagePartCommon
 }
 
-// MessageInputPart 消息的输入部分。
-// 支持文本和多种多模态内容类型。
+// MessageInputPart 表示用户输入消息的多模态部分。
+// 支持文本、图片、音频、视频和文件。
 type MessageInputPart struct {
-	// Type 内容类型。
 	Type ChatMessagePartType `json:"type"`
 
-	// Text 文本内容，当 Type 为 "text" 时使用。
 	Text string `json:"text,omitempty"`
 
-	// Image 图像输入，当 Type 为 "image_url" 时使用。
+	// Image 是图片输入，Type 为 "image_url" 时使用
 	Image *MessageInputImage `json:"image,omitempty"`
 
-	// Audio 音频输入，当 Type 为 "audio_url" 时使用。
+	// Audio 是音频输入，Type 为 "audio_url" 时使用
 	Audio *MessageInputAudio `json:"audio,omitempty"`
 
-	// Video 视频输入，当 Type 为 "video_url" 时使用。
+	// Video 是视频输入，Type 为 "video_url" 时使用
 	Video *MessageInputVideo `json:"video,omitempty"`
 
-	// File 文件输入，当 Type 为 "file_url" 时使用。
+	// File 是文件输入，Type 为 "file_url" 时使用
 	File *MessageInputFile `json:"file,omitempty"`
 }
 
-// MessageOutputImage 消息中的图像输出部分。
+// MessageOutputImage 表示模型生成的图片输出部分
 type MessageOutputImage struct {
 	MessagePartCommon
 }
 
-// MessageOutputAudio 消息中的音频输出部分。
+// MessageOutputAudio 表示模型生成的音频输出部分
 type MessageOutputAudio struct {
 	MessagePartCommon
 }
 
-// MessageOutputVideo 消息中的视频输出部分。
+// MessageOutputVideo 表示模型生成的视频输出部分
 type MessageOutputVideo struct {
 	MessagePartCommon
 }
 
-// MessageOutputPart 助手生成消息的输出部分。
-// 可包含文本或多媒体内容（图像、音频、视频）。
+// MessageOutputPart 表示模型生成的多模态输出部分。
+// 可以包含文本或多媒体内容（图片、音频、视频）。
 type MessageOutputPart struct {
-	// Type 内容类型，例如 "text"、"image_url"、"audio_url"、"video_url"。
+	// Type 是内容类型，如 "text"、"image_url"、"audio_url"、"video_url"
 	Type ChatMessagePartType `json:"type"`
 
-	// Text 文本内容，当 Type 为 "text" 时使用。
+	// Text 是文本内容，Type 为 "text" 时使用
 	Text string `json:"text,omitempty"`
 
-	// Image 图像输出，当 Type 为 ChatMessagePartTypeImageURL 时使用。
+	// Image 是图片输出，Type 为 ChatMessagePartTypeImageURL 时使用
 	Image *MessageOutputImage `json:"image,omitempty"`
 
-	// Audio 音频输出，当 Type 为 ChatMessagePartTypeAudioURL 时使用。
+	// Audio 是音频输出，Type 为 ChatMessagePartTypeAudioURL 时使用
 	Audio *MessageOutputAudio `json:"audio,omitempty"`
 
-	// Video 视频输出，当 Type 为 ChatMessagePartTypeVideoURL 时使用。
+	// Video 是视频输出，Type 为 ChatMessagePartTypeVideoURL 时使用
 	Video *MessageOutputVideo `json:"video,omitempty"`
 }
 
-// ChatMessageImageURL 聊天消息中的图像部分（已废弃）。
-// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
-// 可选择使用 URL 或 URI。支持 RFC-2397 定义的内联图像数据。
-type ChatMessageImageURL struct {
-	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
-	// 具体使用方式请参考模型实现的文档。
-	URL string `json:"url,omitempty"`
-
-	// URI 资源 URI（已废弃）。
-	URI string `json:"uri,omitempty"`
-	// Detail 图像质量级别。
-	Detail ImageURLDetail `json:"detail,omitempty"`
-
-	// MIMEType MIME 类型，例如 "image/png"。
-	MIMEType string `json:"mime_type,omitempty"`
-	// Extra 额外信息存储。
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// ChatMessagePartType 聊天消息部分的内容类型。
+// ChatMessagePartType 定义聊天消息部分的类型
 type ChatMessagePartType string
 
 const (
-	// ChatMessagePartTypeText 文本类型。
+	// ChatMessagePartTypeText 表示文本部分
 	ChatMessagePartTypeText ChatMessagePartType = "text"
-	// ChatMessagePartTypeImageURL 图像 URL 类型。
+	// ChatMessagePartTypeImageURL 表示图片 URL 部分
 	ChatMessagePartTypeImageURL ChatMessagePartType = "image_url"
-	// ChatMessagePartTypeAudioURL 音频 URL 类型。
+	// ChatMessagePartTypeAudioURL 表示音频 URL 部分
 	ChatMessagePartTypeAudioURL ChatMessagePartType = "audio_url"
-	// ChatMessagePartTypeVideoURL 视频 URL 类型。
+	// ChatMessagePartTypeVideoURL 表示视频 URL 部分
 	ChatMessagePartTypeVideoURL ChatMessagePartType = "video_url"
-	// ChatMessagePartTypeFileURL 文件 URL 类型。
+	// ChatMessagePartTypeFileURL 表示文件 URL 部分
 	ChatMessagePartTypeFileURL ChatMessagePartType = "file_url"
 )
 
-// ChatMessageAudioURL 聊天消息中的音频部分（已废弃）。
-// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
-// 可选择使用 URL 或 URI。支持 RFC-2397 定义的内联音频数据。
-type ChatMessageAudioURL struct {
-	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
-	// 具体使用方式请参考模型实现的文档。
-	URL string `json:"url,omitempty"`
-	// URI 资源 URI（已废弃）。
-	URI string `json:"uri,omitempty"`
-
-	// MIMEType MIME 类型，例如 "audio/wav"、"audio/ogg"。
-	MIMEType string `json:"mime_type,omitempty"`
-	// Extra 额外信息存储。
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// ChatMessageVideoURL 聊天消息中的视频部分（已废弃）。
-// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
-// 可选择使用 URL 或 URI。支持 RFC-2397 定义的内联视频数据。
-type ChatMessageVideoURL struct {
-	// URL 资源 URL，可以是传统 URL 或符合 RFC-2397 的 data URL。
-	// 具体使用方式请参考模型实现的文档。
-	URL string `json:"url,omitempty"`
-	// URI 资源 URI（已废弃）。
-	URI string `json:"uri,omitempty"`
-
-	// MIMEType MIME 类型，例如 "video/mp4"。
-	MIMEType string `json:"mime_type,omitempty"`
-	// Extra 额外信息存储。
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// ChatMessageFileURL 聊天消息中的文件部分（已废弃）。
-// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
-// 可选择使用 URL 或 URI。
-type ChatMessageFileURL struct {
-	// URL 资源 URL。
-	URL string `json:"url,omitempty"`
-	// URI 资源 URI（已废弃）。
-	URI string `json:"uri,omitempty"`
-
-	// MIMEType MIME 类型，例如 "application/pdf"、"text/plain"。
-	MIMEType string `json:"mime_type,omitempty"`
-	// Name 文件名称。
-	Name string `json:"name,omitempty"`
-
-	// Extra 额外信息存储。
-	Extra map[string]any `json:"extra,omitempty"`
-}
-
-// ChatMessagePart 聊天消息中的内容部分（已废弃）。
-// 已废弃：此结构已废弃，因为 MultiContent 字段已废弃。
-type ChatMessagePart struct {
-	// Type 内容类型，例如 "text"、"image_url"、"audio_url"、"video_url"、"file_url"。
-	Type ChatMessagePartType `json:"type,omitempty"`
-
-	// Text 文本内容，当 Type 为 "text" 时使用。
-	Text string `json:"text,omitempty"`
-
-	// ImageURL 图像 URL，当 Type 为 "image_url" 时使用。
-	ImageURL *ChatMessageImageURL `json:"image_url,omitempty"`
-	// AudioURL 音频 URL，当 Type 为 "audio_url" 时使用。
-	AudioURL *ChatMessageAudioURL `json:"audio_url,omitempty"`
-	// VideoURL 视频 URL，当 Type 为 "video_url" 时使用。
-	VideoURL *ChatMessageVideoURL `json:"video_url,omitempty"`
-	// FileURL 文件 URL，当 Type 为 "file_url" 时使用。
-	FileURL *ChatMessageFileURL `json:"file_url,omitempty"`
-}
-
-// LogProbs 包含日志概率信息的顶层结构。
+// LogProbs 是包含对数概率信息的顶层结构
 type LogProbs struct {
-	// Content 消息内容 token 及其日志概率信息列表。
+	// Content 是包含对数概率信息的消息内容 token 列表
 	Content []LogProb `json:"content"`
 }
 
-// LogProb token 的概率信息。
+// LogProb 表示单个 token 的概率信息
 type LogProb struct {
-	// Token token 的文本表示，是语言模型分词过程识别的连续字符序列。
-	// 例如：单词、词的一部分或标点符号。
+	// Token 是 token 的文本，是语言模型分词过程理解的连续字符序列
+	// （如单词、单词的一部分或标点符号）
 	Token string `json:"token"`
-	// LogProb token 的对数概率。
-	// 若在前 20 个最可能的 token 之内，则为实际值；否则为 -9999.0 表示极不可能。
+	// LogProb 是该 token 的对数概率，如果在前 20 个最可能的 token 中。
+	// 否则使用 -9999.0 表示该 token 概率很低。
 	LogProb float64 `json:"logprob"`
-	// Bytes token 的 UTF-8 字节表示。
-	// 用于多 token 表示单个字符时的字节组合场景。可能为空。
+	// Bytes 是表示 token 的 UTF-8 字节的整数列表。
+	// 在字符由多个 token 表示且需要组合字节表示才能生成正确文本时很有用。
+	// 如果没有字节表示则为 null。
 	Bytes []int64 `json:"bytes,omitempty"`
-	// TopLogProbs 当前位置最可能的 token 及其对数概率列表。
-	// 在极少数情况下，返回数量可能少于请求的 top_logprobs 数量。
+	// TopLogProbs 是该 token 位置最可能的 token 及其对数概率列表。
+	// 极少情况下可能少于请求的 top_logprobs 数量。
 	TopLogProbs []TopLogProb `json:"top_logprobs"`
 }
 
-// TopLogProb 高概率 token 的信息。
+// TopLogProb 表示最可能的 token 及其概率信息
 type TopLogProb struct {
-	// Token token 的文本表示。
+	// Token 是 token 的文本，是语言模型分词过程理解的连续字符序列
 	Token string `json:"token"`
-	// LogProb token 的对数概率。
-	// 若在前 20 个最可能的 token 之内，则为实际值；否则为 -9999.0。
+	// LogProb 是该 token 的对数概率，如果在前 20 个最可能的 token 中。
+	// 否则使用 -9999.0 表示该 token 概率很低。
 	LogProb float64 `json:"logprob"`
-	// Bytes token 的 UTF-8 字节表示。
+	// Bytes 是表示 token 的 UTF-8 字节的整数列表
 	Bytes []int64 `json:"bytes,omitempty"`
 }
 
-// ResponseMeta 聊天响应的元信息。
+// ResponseMeta 收集聊天响应的元信息
 type ResponseMeta struct {
-	// FinishReason 响应结束原因。
-	// 通常为 "stop"、"length"、"tool_calls"、"content_filter"、"null" 等，具体由模型实现定义。
+	// FinishReason 是聊天响应结束的原因。
+	// 通常是 "stop"、"length"、"tool_calls"、"content_filter"、"null"，由模型实现定义。
 	FinishReason string `json:"finish_reason,omitempty"`
-	// Usage token 使用情况。
-	// 是否存在取决于聊天模型实现是否返回。
+	// Usage 是聊天响应的 token 使用量，是否存在取决于模型实现是否返回
 	Usage *TokenUsage `json:"usage,omitempty"`
-	// LogProbs 日志概率信息。
+	// LogProbs 是对数概率信息
 	LogProbs *LogProbs `json:"logprobs,omitempty"`
 }
 
-// Message 消息结构体，表示模型输入和输出的数据结构。
-// 来源可以是用户输入或模型返回，支持纯文本和多模态内容。
+// Message 表示模型输入和输出的数据结构，来源于用户输入或模型返回。
+// 支持纯文本和多模态内容。
 //
 // 用户纯文本输入，使用 Content 字段：
 //
@@ -392,7 +323,7 @@ type ResponseMeta struct {
 //	}
 //
 // 用户多模态输入，使用 UserInputMultiContent 字段。
-// 可以组合文本与其他媒体（如图像）：
+// 可以组合文本和其他媒体（如图片）：
 //
 //	&schema.Message{
 //		Role: schema.User,
@@ -407,13 +338,13 @@ type ResponseMeta struct {
 //		},
 //	}
 //
-// 模型返回多模态内容时，使用 AssistantGenMultiContent 字段：
+// 模型返回多模态内容，使用 AssistantGenMultiContent 字段：
 //
 //	&schema.Message{
 //		Role: schema.Assistant,
 //		AssistantGenMultiContent: []schema.MessageOutputPart{
-//			{Type: schema.ChatMessagePartTypeText, Text: "这是生成的图像："},
-//			{Type: schema.ChatMessagePartTypeImage, Image: &schema.MessageOutputImage{
+//			{Type: schema.ChatMessagePartTypeText, Text: "这是生成的图片："},
+//			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageOutputImage{
 //				MessagePartCommon: schema.MessagePartCommon{
 //					Base64Data: toPtr("base64_image_binary"),
 //					MIMEType:   "image/png",
@@ -428,10 +359,6 @@ type Message struct {
 	// Content 文本内容。
 	// 用于用户文本输入和模型文本输出。
 	Content string `json:"content"`
-
-	// MultiContent 多内容部分（已废弃）。
-	// 已废弃：用户多模态输入使用 UserInputMultiContent，模型多模态输出使用 AssistantGenMultiContent。
-	MultiContent []ChatMessagePart `json:"multi_content,omitempty"`
 
 	// UserInputMultiContent 用户提供的多模态内容。
 	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
@@ -461,46 +388,44 @@ type Message struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// TokenUsage 聊天模型请求的 token 使用情况。
+// TokenUsage 表示聊天模型请求的 token 使用量
 type TokenUsage struct {
-	// PromptTokens 提示 token 数量。
-	// 包含本次请求的所有输入 token。
+	// PromptTokens 是提示词 token 数量，包括该请求的所有输入 token
 	PromptTokens int `json:"prompt_tokens"`
-	// PromptTokenDetails 提示 token 的详细分解。
+	// PromptTokenDetails 是提示词 token 的详细分解
 	PromptTokenDetails PromptTokenDetails `json:"prompt_token_details"`
-	// CompletionTokens 补全 token 数量。
+	// CompletionTokens 是补全 token 数量
 	CompletionTokens int `json:"completion_tokens"`
-	// TotalTokens 总 token 数量。
+	// TotalTokens 是总 token 数量
 	TotalTokens int `json:"total_tokens"`
 }
 
-// PromptTokenDetails 提示 token 的详细信息。
+// PromptTokenDetails 包含提示词 token 的详细信息
 type PromptTokenDetails struct {
-	// CachedTokens 提示中的缓存 token 数量。
+	// CachedTokens 是提示词中的缓存 token 数量
 	CachedTokens int `json:"cached_tokens"`
 }
 
 var _ MessagesTemplate = &Message{}
 var _ MessagesTemplate = MessagesPlaceholder("", false)
 
-// MessagesTemplate 消息模板接口。
-// 用于将模板渲染为消息列表。
+// MessagesTemplate 是消息模板接口，用于将模板渲染为消息列表。
 //
-// 使用示例：
+// 示例：
 //
 //	chatTemplate := prompt.FromMessages(
 //		schema.SystemMessage("you are eino helper"),
-//		schema.MessagesPlaceholder("history", false), // 使用 params 中的 "history" 值
+//		schema.MessagesPlaceholder("history", false), // <= 会使用 params 中的 "history" 值
 //	)
 //	msgs, err := chatTemplate.Format(ctx, params)
 type MessagesTemplate interface {
 	Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error)
 }
 
-// messagesPlaceholder 消息占位符实现。
+// messagesPlaceholder 实现消息占位符，从参数中提取消息列表
 type messagesPlaceholder struct {
-	key      string // 参数键名。
-	optional bool   // 是否可选。
+	key      string // 参数键名
+	optional bool   // 是否可选
 }
 
 // MessagesPlaceholder 创建消息占位符。
@@ -554,7 +479,7 @@ func (p *messagesPlaceholder) Format(_ context.Context, vs map[string]any, _ For
 	return msgs, nil
 }
 
-// formatContent 根据格式化类型格式化内容字符串。
+// formatContent 根据指定的格式类型格式化内容字符串
 func formatContent(content string, vs map[string]any, formatType FormatType) (string, error) {
 	switch formatType {
 	case FString:
@@ -591,7 +516,7 @@ func formatContent(content string, vs map[string]any, formatType FormatType) (st
 	}
 }
 
-// Format 根据指定格式类型渲染消息并返回。
+// Format 使用指定的格式类型渲染消息并返回渲染后的消息列表。
 //
 // 使用示例：
 //
@@ -606,13 +531,6 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	copied := *m
 	copied.Content = c
 
-	if len(m.MultiContent) > 0 {
-		copied.MultiContent, err = formatMultiContent(m.MultiContent, vs, formatType)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	if len(m.UserInputMultiContent) > 0 {
 		copied.UserInputMultiContent, err = formatUserInputMultiContent(m.UserInputMultiContent, vs, formatType)
 		if err != nil {
@@ -623,62 +541,7 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	return []*Message{&copied}, nil
 }
 
-// formatMultiContent 格式化多内容部分（已废弃的 MultiContent 字段）。
-func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, formatType FormatType) ([]ChatMessagePart, error) {
-	copiedMC := make([]ChatMessagePart, len(multiContent))
-	copy(copiedMC, multiContent)
-
-	for i, mc := range copiedMC {
-		switch mc.Type {
-		case ChatMessagePartTypeText:
-			nmc, err := formatContent(mc.Text, vs, formatType)
-			if err != nil {
-				return nil, err
-			}
-			copiedMC[i].Text = nmc
-		case ChatMessagePartTypeImageURL:
-			if mc.ImageURL == nil {
-				continue
-			}
-			url, err := formatContent(mc.ImageURL.URL, vs, formatType)
-			if err != nil {
-				return nil, err
-			}
-			copiedMC[i].ImageURL.URL = url
-		case ChatMessagePartTypeAudioURL:
-			if mc.AudioURL == nil {
-				continue
-			}
-			url, err := formatContent(mc.AudioURL.URL, vs, formatType)
-			if err != nil {
-				return nil, err
-			}
-			copiedMC[i].AudioURL.URL = url
-		case ChatMessagePartTypeVideoURL:
-			if mc.VideoURL == nil {
-				continue
-			}
-			url, err := formatContent(mc.VideoURL.URL, vs, formatType)
-			if err != nil {
-				return nil, err
-			}
-			copiedMC[i].VideoURL.URL = url
-		case ChatMessagePartTypeFileURL:
-			if mc.FileURL == nil {
-				continue
-			}
-			url, err := formatContent(mc.FileURL.URL, vs, formatType)
-			if err != nil {
-				return nil, err
-			}
-			copiedMC[i].FileURL.URL = url
-		}
-	}
-
-	return copiedMC, nil
-}
-
-// formatUserInputMultiContent 格式化用户输入的多模态内容。
+// formatUserInputMultiContent 格式化用户输入的多模态内容部分
 func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs map[string]any, formatType FormatType) ([]MessageInputPart, error) {
 	copiedUIMC := make([]MessageInputPart, len(userInputMultiContent))
 	copy(copiedUIMC, userInputMultiContent)
@@ -769,9 +632,9 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 	return copiedUIMC, nil
 }
 
-// String 返回消息的字符串表示。
+// String 返回消息的字符串表示形式。
 //
-// 使用示例：
+// 示例：
 //
 //	msg := schema.UserMessage("hello world")
 //	fmt.Println(msg.String()) // 输出: user: hello world
@@ -817,7 +680,7 @@ func (m *Message) String() string {
 	return sb.String()
 }
 
-// SystemMessage 创建系统消息。
+// SystemMessage 创建系统消息，用于设置系统提示词
 func SystemMessage(content string) *Message {
 	return &Message{
 		Role:    System,
@@ -825,7 +688,7 @@ func SystemMessage(content string) *Message {
 	}
 }
 
-// AssistantMessage 创建助手消息。
+// AssistantMessage 创建助手消息，用于表示模型的响应
 func AssistantMessage(content string, toolCalls []ToolCall) *Message {
 	return &Message{
 		Role:      Assistant,
@@ -834,7 +697,7 @@ func AssistantMessage(content string, toolCalls []ToolCall) *Message {
 	}
 }
 
-// UserMessage 创建用户消息。
+// UserMessage 创建用户消息，用于表示用户的输入
 func UserMessage(content string) *Message {
 	return &Message{
 		Role:    User,
@@ -843,22 +706,23 @@ func UserMessage(content string) *Message {
 
 }
 
-// toolMessageOptions 工具消息的选项配置。
+// toolMessageOptions 工具消息的选项配置
 type toolMessageOptions struct {
-	toolName string // 工具名称。
+	toolName string
 }
 
-// ToolMessageOption 工具消息选项函数类型。
+// ToolMessageOption 是创建工具消息的选项函数类型
 type ToolMessageOption func(*toolMessageOptions)
 
-// WithToolName 设置工具调用名称。
+// WithToolName 设置工具消息的工具名称
 func WithToolName(name string) ToolMessageOption {
 	return func(o *toolMessageOptions) {
 		o.toolName = name
 	}
 }
 
-// ToolMessage 创建工具消息。
+// ToolMessage 创建工具消息，用于表示工具调用的输出。
+// toolCallID 用于关联对应的工具调用请求。
 func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *Message {
 	o := &toolMessageOptions{}
 	for _, opt := range opts {
@@ -872,8 +736,8 @@ func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *
 	}
 }
 
-// concatToolCalls 合并工具调用分块。
-// 根据 Index 字段合并相同工具调用的多个分块。
+// concatToolCalls 合并具有相同索引的工具调用块。
+// 用于流式场景，将多个工具调用块合并为完整的工具调用。
 func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	var merged []ToolCall
 	m := make(map[int][]int)
@@ -958,7 +822,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	return merged, nil
 }
 
-// isBase64AudioPart 检查是否为 Base64 编码的音频部分。
+// isBase64AudioPart 检查消息输出部分是否为 Base64 编码的音频
 func isBase64AudioPart(part MessageOutputPart) bool {
 	return part.Type == ChatMessagePartTypeAudioURL &&
 		part.Audio != nil &&
@@ -966,8 +830,8 @@ func isBase64AudioPart(part MessageOutputPart) bool {
 		part.Audio.URL == nil
 }
 
-// concatAssistantMultiContent 合并助手多内容部分。
-// 连续的文本部分会被合并，连续的 Base64 音频部分会被合并。
+// concatAssistantMultiContent 合并助手生成的多模态内容部分。
+// 连续的文本部分会被合并为单个文本，连续的 Base64 音频部分会被合并为单个音频。
 func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart, error) {
 	if len(parts) == 0 {
 		return parts, nil
@@ -1098,7 +962,6 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		reasoningContents             []string
 		reasoningContentLen           int
 		toolCalls                     []ToolCall
-		multiContentParts             []ChatMessagePart
 		assistantGenMultiContentParts []MessageOutputPart
 		ret                           = Message{}
 		extraList                     = make([]map[string]any, 0, len(msgs))
@@ -1159,11 +1022,6 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 
 		if len(msg.Extra) > 0 {
 			extraList = append(extraList, msg.Extra)
-		}
-
-		// The 'MultiContent' field is deprecated but is kept for backward compatibility.
-		if len(msg.MultiContent) > 0 {
-			multiContentParts = append(multiContentParts, msg.MultiContent...)
 		}
 
 		if len(msg.AssistantGenMultiContent) > 0 {
@@ -1255,10 +1113,6 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		if len(extra) > 0 {
 			ret.Extra = extra
 		}
-	}
-
-	if len(multiContentParts) > 0 {
-		ret.MultiContent = multiContentParts
 	}
 
 	if len(assistantGenMultiContentParts) > 0 {

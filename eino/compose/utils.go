@@ -1,5 +1,3 @@
-package compose
-
 /*
  * utils.go - 工具函数集合
  *
@@ -20,6 +18,8 @@ package compose
  *   - 与 runnable.go 协同实现可执行对象的回调
  *   - 为各种节点类型提供统一的回调接口
  */
+
+package compose
 
 import (
 	"context"

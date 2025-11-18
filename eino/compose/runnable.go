@@ -37,7 +37,7 @@ import (
 
 // ====== 可执行对象接口 ======
 
-// Runnable 可执行对象接口，定义四种数据流模式
+// Runnable 可执行对象接口，定义四种数据流模式。
 // Graph、Chain 可编译为 Runnable
 type Runnable[I, O any] interface {
 	Invoke(ctx context.Context, input I, opts ...Option) (output O, err error)

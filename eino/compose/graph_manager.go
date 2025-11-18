@@ -1,3 +1,26 @@
+/*
+ * graph_manager.go - 图管理器，负责图的运行时调度和任务管理
+ *
+ * 核心组件：
+ *   - channelManager: 通道管理器，管理节点间的数据流和控制流
+ *   - taskManager: 任务管理器，负责任务的提交、执行和等待
+ *   - edgeHandlerManager: 边处理器管理器，处理边上的数据转换
+ *
+ * 设计特点：
+ *   - 并发调度: 支持多任务并发执行，自动管理任务依赖
+ *   - 数据流控制: 区分数据依赖和控制依赖，精确控制执行顺序
+ *   - 中断支持: 支持用户中断和超时控制
+ *   - 流式处理: 统一处理流式和非流式数据传递
+ *   - 边处理器: 支持在边上添加数据转换处理器
+ *
+ * 执行流程：
+ *   1. channelManager 管理节点间的数据和控制依赖
+ *   2. 当节点就绪时，创建任务提交到 taskManager
+ *   3. taskManager 并发执行任务或同步执行单个任务
+ *   4. 任务完成后更新 channel，触发后续节点执行
+ *   5. 支持用户中断和超时控制机制
+ */
+
 package compose
 
 import (
@@ -10,50 +33,25 @@ import (
 	"github.com/favbox/eino/internal/safe"
 )
 
-// channel 通道接口 - 定义节点间通信通道的标准契约
-// 设计意图：抽象不同类型的通道实现（Pregel/DAG），提供统一的通信抽象
-// 关键方法：
-//   - reportValues: 报告数据值，更新通道内容
-//   - reportDependencies: 报告依赖关系，管理前置节点
-//   - reportSkip: 报告被跳过的节点，处理分支跳过逻辑
-//   - get: 获取就绪节点的数据，支持边处理器
-//   - convertValues: 批量转换通道值
-//   - load: 加载检查点通道数据
-//   - setMergeConfig: 设置扇入合并策略
+// channel 是节点通道接口，管理节点的输入数据和执行依赖
 type channel interface {
-	reportValues(map[string]any) error
-	reportDependencies([]string)
-	reportSkip([]string) bool
-	get(bool, string, *edgeHandlerManager) (any, bool, error)
-	convertValues(fn func(map[string]any) error) error
-	load(channel) error
+	reportValues(map[string]any) error                        // 报告输入值
+	reportDependencies([]string)                              // 报告控制依赖
+	reportSkip([]string) bool                                 // 报告跳过状态
+	get(bool, string, *edgeHandlerManager) (any, bool, error) // 获取就绪的输入数据
+	convertValues(fn func(map[string]any) error) error        // 转换输入值
+	load(channel) error                                       // 从另一个 channel 加载状态
 
-	setMergeConfig(FanInMergeConfig)
+	setMergeConfig(FanInMergeConfig) // 设置扇入合并配置
 }
 
-// edgeHandlerManager 边处理器管理器 - 管理节点间边上的数据转换处理器
-// 设计意图：集中管理边上的类型转换、字段映射等处理器，支持流式和非流式处理
-// 数据结构：三层嵌套映射 - fromNode -> toNode -> handlerPair[]
-// 关键能力：
-//   - 批量转换：按顺序应用多个处理器
-//   - 模式适配：自动适配流式/非流式模式
-//   - 错误传播：处理器链中任何错误都会中断处理
+// edgeHandlerManager 管理边上的数据处理器。
+// 在数据从一个节点流向另一个节点时，可以对数据进行转换处理。
 type edgeHandlerManager struct {
-	h map[string]map[string][]handlerPair
+	h map[string]map[string][]handlerPair // 边处理器映射：from -> to -> handlers
 }
 
-// handle 边处理器执行方法 - 应用边上所有处理器对数据进行转换
-// 参数：
-//   - from: 源节点键
-//   - to: 目标节点键
-//   - value: 待处理的数据
-//   - isStream: 是否流式模式
-//
-// 返回：转换后的数据和可能的错误
-// 处理逻辑：
-//  1. 检查是否存在 from->to 的处理器
-//  2. 根据执行模式选择处理器类型（流式 transform / 非流式 invoke）
-//  3. 顺序执行处理器链，任何错误都会中断处理
+// handle 处理从 from 节点到 to 节点的边上的数据转换
 func (e *edgeHandlerManager) handle(from, to string, value any, isStream bool) (any, error) {
 	if _, ok := e.h[from]; !ok {
 		return value, nil
@@ -77,25 +75,13 @@ func (e *edgeHandlerManager) handle(from, to string, value any, isStream bool) (
 	return value, nil
 }
 
-// preNodeHandlerManager 节点前置处理器管理器 - 管理节点执行前的数据预处理
-// 设计意图：在节点正式执行前对输入数据进行转换，支持字段映射、类型转换等
-// 数据结构：nodeKey -> handlerPair[] 映射
-// 应用场景：
-//   - 字段映射：从结构体提取特定字段
-//   - 输入转换：将外部数据格式转换为节点期望格式
-//   - 验证检查：对输入数据进行预处理验证
+// preNodeHandlerManager 管理节点前置处理器。
+// 在节点执行前对输入数据进行预处理。
 type preNodeHandlerManager struct {
-	h map[string][]handlerPair
+	h map[string][]handlerPair // 节点前置处理器映射：nodeKey -> handlers
 }
 
-// handle 节点前置处理器执行方法 - 应用节点的所有前置处理器
-// 参数：
-//   - nodeKey: 节点键
-//   - value: 待处理的输入数据
-//   - isStream: 是否流式模式
-//
-// 返回：预处理后的数据和可能的错误
-// 执行流程：顺序应用节点的所有前置处理器，类似于边处理器
+// handle 处理节点执行前的数据预处理
 func (p *preNodeHandlerManager) handle(nodeKey string, value any, isStream bool) (any, error) {
 	if _, ok := p.h[nodeKey]; !ok {
 		return value, nil
@@ -116,25 +102,13 @@ func (p *preNodeHandlerManager) handle(nodeKey string, value any, isStream bool)
 	return value, nil
 }
 
-// preBranchHandlerManager 分支前置处理器管理器 - 管理分支条件执行前的数据处理
-// 设计意图：处理分支条件的数据预处理，支持多分支场景下的独立处理器链
-// 数据结构：nodeKey -> []handlerPair[] 映射（第二层是分支索引，第三层是处理器链）
-// 特殊处理：支持多分支索引，每个分支可以有自己的处理器链
+// preBranchHandlerManager 管理分支前置处理器。
+// 在分支条件判断前对数据进行预处理。
 type preBranchHandlerManager struct {
-	h map[string][][]handlerPair
+	h map[string][][]handlerPair // 分支前置处理器映射：nodeKey -> branchIdx -> handlers
 }
 
-// handle 分支前置处理器执行方法 - 应用指定分支的处理器链
-// 参数：
-//   - nodeKey: 节点键
-//   - idx: 分支索引
-//   - value: 待处理的输入数据
-//   - isStream: 是否流式模式
-//
-// 返回：预处理后的数据和可能的错误
-// 处理逻辑：
-//  1. 根据 nodeKey 和 idx 定位处理器链
-//  2. 顺序执行该分支的所有前置处理器
+// handle 处理分支条件判断前的数据预处理
 func (p *preBranchHandlerManager) handle(nodeKey string, idx int, value any, isStream bool) (any, error) {
 	if _, ok := p.h[nodeKey]; !ok {
 		return value, nil
@@ -155,39 +129,21 @@ func (p *preBranchHandlerManager) handle(nodeKey string, idx int, value any, isS
 	return value, nil
 }
 
-// channelManager 通道管理器 - 管理图中所有节点的通信通道和依赖关系
-// 设计意图：统一管理节点间的数据流和控制流，是图执行时的核心调度组件
-// 关键职责：
-//   - 通道管理：创建、维护和更新节点间通信通道
-//   - 依赖跟踪：管理数据依赖和控制依赖关系
-//   - 就绪检测：判断哪些节点已准备好执行
-//   - 处理器协调：协调边处理器和节点前置处理器
-//
-// 核心字段：
-//   - isStream: 是否流式执行模式
-//   - channels: 所有节点的通道映射
-//   - successors: 节点的后续节点映射
-//   - dataPredecessors/controlPredecessors: 数据和控制前置依赖
-//   - 处理器管理器：边、节点、分支处理器
+// channelManager 管理图中所有节点的通道，协调数据流和控制流。
+// 维护节点间的依赖关系，决定节点的执行顺序。
 type channelManager struct {
-	isStream bool
-	channels map[string]channel
+	isStream bool               // 是否流式模式
+	channels map[string]channel // 节点通道映射
 
-	successors          map[string][]string
-	dataPredecessors    map[string]map[string]struct{}
-	controlPredecessors map[string]map[string]struct{}
+	successors          map[string][]string            // 后继节点映射
+	dataPredecessors    map[string]map[string]struct{} // 数据前驱节点映射
+	controlPredecessors map[string]map[string]struct{} // 控制前驱节点映射
 
-	edgeHandlerManager    *edgeHandlerManager
-	preNodeHandlerManager *preNodeHandlerManager
+	edgeHandlerManager    *edgeHandlerManager    // 边处理器管理器
+	preNodeHandlerManager *preNodeHandlerManager // 节点前置处理器管理器
 }
 
-// loadChannels 从检查点加载通道数据 - 恢复图执行状态
-// 参数：
-//   - channels: 检查点中的通道映射
-//
-// 返回：加载过程中的错误
-// 使用场景：从检查点恢复图执行时，加载所有通道的持久化状态
-// 处理逻辑：遍历当前管理的通道，从检查点中加载对应通道的数据
+// loadChannels 从另一组通道加载状态，用于恢复执行
 func (c *channelManager) loadChannels(channels map[string]channel) error {
 	for key, ch := range c.channels {
 		if nCh, ok := channels[key]; ok {
@@ -199,19 +155,7 @@ func (c *channelManager) loadChannels(channels map[string]channel) error {
 	return nil
 }
 
-// updateValues 更新通道数据值 - 将完成的节点输出传递给后继节点
-// 参数：
-//   - values: 目标节点 -> (源节点 -> 数据值) 的映射
-//
-// 返回：更新过程中的错误
-// 执行流程：
-//  1. 遍历所有需要更新的目标节点
-//  2. 验证目标通道存在
-//  3. 检查数据前置依赖，过滤无效的数据源
-//  4. 关闭无关的流式数据，防止资源泄漏
-//  5. 向目标通道报告有效的数据值
-//
-// 关键处理：只接受有数据依赖关系的数据源，无关数据会被丢弃并关闭流
+// updateValues 更新节点通道的输入值
 func (c *channelManager) updateValues(_ context.Context, values map[string] /*to*/ map[string] /*from*/ any) error {
 	for target, fromMap := range values {
 		toChannel, ok := c.channels[target]
@@ -241,18 +185,7 @@ func (c *channelManager) updateValues(_ context.Context, values map[string] /*to
 	return nil
 }
 
-// updateDependencies 更新通道依赖关系 - 管理节点执行顺序的控制依赖
-// 参数：
-//   - dependenciesMap: 目标节点 -> 依赖源节点列表 的映射
-//
-// 返回：更新过程中的错误
-// 执行逻辑：
-//  1. 遍历所有需要更新依赖的目标节点
-//  2. 验证目标通道存在
-//  3. 检查控制前置依赖，过滤无效的依赖源
-//  4. 向目标通道报告有效的依赖列表
-//
-// 用途：确保节点按照正确的顺序执行，控制依赖不影响数据传递
+// updateDependencies 更新节点通道的控制依赖
 func (c *channelManager) updateDependencies(_ context.Context, dependenciesMap map[string][]string) error {
 	for target, dependencies := range dependenciesMap {
 		toChannel, ok := c.channels[target]
@@ -275,7 +208,7 @@ func (c *channelManager) updateDependencies(_ context.Context, dependenciesMap m
 	return nil
 }
 
-// getFromReadyChannels 获取就绪通道的数据 - 识别可以执行的后续节点
+// getFromReadyChannels 获取所有就绪节点的输入数据 - 识别可以执行的后续节点
 // 返回：
 //   - map[string]any: 节点键到输入数据的映射（仅包含就绪节点）
 //   - error: 获取过程中的错误
@@ -305,7 +238,8 @@ func (c *channelManager) getFromReadyChannels(_ context.Context) (map[string]any
 	return result, nil
 }
 
-// updateAndGet 更新通道并获取就绪节点 - 一站式通道更新和就绪检测
+// updateAndGet 更新通道状态并获取就绪节点的输入数据。
+//
 // 参数：
 //   - values: 节点数据更新映射
 //   - dependencies: 依赖关系更新映射
@@ -333,11 +267,7 @@ func (c *channelManager) updateAndGet(ctx context.Context, values map[string]map
 	return c.getFromReadyChannels(ctx)
 }
 
-// reportBranch 报告分支跳过情况 - 处理分支中被跳过的节点及其级联影响
-// 参数：
-//   - from: 分支起始节点
-//   - skippedNodes: 直接被跳过的节点列表
-//
+// reportBranch 报告分支跳过的节点，并递归传播跳过状态。
 // 返回：处理过程中的错误
 // 处理逻辑：
 //  1. 遍历直接被跳过的节点，标记这些节点为跳过状态
@@ -375,68 +305,35 @@ func (c *channelManager) reportBranch(from string, skippedNodes []string) error 
 	return nil
 }
 
-// task 任务结构体 - 封装节点执行的所有上下文和状态
-// 设计意图：统一管理任务执行的所有信息，包括输入输出、选项、错误等
-// 关键字段：
-//   - ctx: 执行上下文，包含节点路径、状态等
-//   - nodeKey: 节点键标识
-//   - call: 节点的通道调用信息（执行器、连接关系、处理器）
-//   - input/output: 任务的输入和输出数据
-//   - option: 运行时选项，支持节点级配置
-//   - err: 任务执行错误
-//   - skipPreHandler: 跳过前置处理器标记（用于检查点恢复）
+// task 表示单个节点的执行任务
 type task struct {
-	ctx            context.Context
-	nodeKey        string
-	call           *chanCall
-	input          any
-	output         any
-	option         []any
-	err            error
-	skipPreHandler bool
+	ctx            context.Context // 执行上下文
+	nodeKey        string          // 节点键名
+	call           *chanCall       // 节点调用信息
+	input          any             // 输入数据
+	output         any             // 输出数据
+	option         []any           // 调用选项
+	err            error           // 执行错误
+	skipPreHandler bool            // 是否跳过前置处理器
 }
 
-// taskManager 任务管理器 - 负责任务的提交、执行和等待，是图执行的调度核心。
-// 设计意图：提供灵活的任务调度机制，支持同步/异步执行、优雅/强制取消、超时控制。
-// 执行模式：
-//   - needAll=true: 等待所有任务完成（DAG模式）
-//   - needAll=false: 任意任务完成即可（Pregel模式）
-//
-// 核心字段：
-//   - runWrapper: 可执行对象调用包装器（同步/流式）
-//   - opts: 全局运行时选项
-//   - needAll: 执行模式标记
-//   - num: 当前运行的任务数量
-//   - done: 任务完成通道（无界通道，避免阻塞）
-//   - runningTasks: 运行中的任务映射（用于取消）
-//   - cancelCh: 取消信号通道
-//   - canceled: 取消状态标记
-//   - deadline: 截止时间（用于超时控制）
+// taskManager 管理任务的提交、执行和等待。
+// 支持并发执行多个任务，支持用户中断和超时控制。
 type taskManager struct {
-	runWrapper runnableCallWrapper
-	opts       []Option
-	needAll    bool
+	runWrapper runnableCallWrapper // 可运行对象调用包装器
+	opts       []Option            // 图选项
+	needAll    bool                // 是否需要等待所有任务完成，true=DAG，false=Pregel
 
-	num          uint32
-	done         *internal.UnboundedChan[*task]
-	runningTasks map[string]*task
+	num          uint32                         // 运行中的任务数量
+	done         *internal.UnboundedChan[*task] // 完成任务通道
+	runningTasks map[string]*task               // 运行中的任务映射
 
-	cancelCh chan *time.Duration
-	canceled bool
-	deadline *time.Time
+	cancelCh chan *time.Duration // 中断信号通道
+	canceled bool                // 是否已中断
+	deadline *time.Time          // 中断超时截止时间
 }
 
-// execute 任务执行方法 - 在 goroutine 中执行单个任务
-// 参数：
-//   - currentTask: 要执行的任务
-//
-// 执行流程：
-//  1. 延迟恢复：捕获执行过程中的 panic，转换为安全错误
-//  2. 回调初始化：初始化节点的回调处理器（OnStart, OnEnd, OnError等）
-//  3. 任务执行：调用 runWrapper 执行实际任务（同步/流式）
-//  4. 结果传递：通过 done 通道传递执行结果
-//
-// panic 处理：将 panic 转换为结构化错误，包含堆栈信息便于调试
+// execute 执行单个任务，捕获 panic 并发送完成信号
 func (t *taskManager) execute(currentTask *task) {
 	defer func() {
 		panicInfo := recover()
@@ -452,21 +349,9 @@ func (t *taskManager) execute(currentTask *task) {
 	currentTask.output, currentTask.err = t.runWrapper(ctx, currentTask.call.action, currentTask.input, currentTask.option...)
 }
 
-// submit 提交任务池 - 负责任务的提交和调度策略选择
-// 参数：
-//   - tasks: 待提交的任务列表
-//
-// 返回：提交过程中的错误
-// 调度策略：
-//  1. 前置处理器验证：执行每个任务的前置处理器，失败则立即标记为失败
-//  2. 同步执行优化：单任务或 needAll 模式下同步执行，减少 goroutine 开销
-//  3. 异步并行执行：多任务场景下并发执行，提高吞吐量
-//  4. 取消保护：可中断模式下禁止同步执行，确保响应中断信号
-//
-// 性能优化点：
-//   - 单任务同步执行避免 goroutine 开销
-//   - 无界通道保证任务提交不阻塞
-//   - 前置处理器失败快速返回，减少资源占用
+// submit 提交任务到任务池。
+// 根据任务数量和执行模式决定是同步执行还是异步执行。
+// 如果只有一个任务或需要等待所有任务，且没有中断通道，则同步执行第一个任务。
 func (t *taskManager) submit(tasks []*task) error {
 	if len(tasks) == 0 {
 		return nil
@@ -494,7 +379,7 @@ func (t *taskManager) submit(tasks []*task) error {
 	}
 
 	var syncTask *task
-	if t.num == 0 && (len(tasks) == 1 || t.needAll) && t.cancelCh == nil /*if graph can be interrupted by user, shouldn't sync run task*/ {
+	if t.num == 0 && (len(tasks) == 1 || t.needAll) && t.cancelCh == nil /*如果图可以被用户中断，不应该同步运行任务*/ {
 		syncTask = tasks[0]
 		tasks = tasks[1:]
 	}
@@ -509,19 +394,8 @@ func (t *taskManager) submit(tasks []*task) error {
 	return nil
 }
 
-// wait 等待任务完成 - 根据执行模式选择等待策略
-// 返回：
-//   - tasks: 完成的任务列表
-//   - canceled: 是否发生取消
-//   - canceledTasks: 被取消的任务列表
-//
-// 执行逻辑：
-//  1. needAll 模式：等待所有任务完成（使用 waitAll）
-//  2. 单任务模式：等待任意一个任务完成（使用 waitOne）
-//  3. 取消处理：
-//     - 超时取消：返回所有运行中的任务为取消任务
-//     - 非超时取消：等待所有任务完成后再返回
-//  4. 失败处理：前置处理器失败的任务不参与等待
+// wait 等待任务完成。
+// 根据执行模式返回完成的任务、中断标志和被中断的任务。
 func (t *taskManager) wait() (tasks []*task, canceled bool, canceledTasks []*task) {
 	if t.needAll {
 		tasks, canceledTasks = t.waitAll()
@@ -530,7 +404,7 @@ func (t *taskManager) wait() (tasks []*task, canceled bool, canceledTasks []*tas
 
 	ta, success, canceled := t.waitOne()
 	if canceled {
-		// 已取消且超时，返回取消的任务
+		// 已中断且超时，返回被中断的任务
 		for _, rta := range t.runningTasks {
 			canceledTasks = append(canceledTasks, rta)
 		}
@@ -539,7 +413,7 @@ func (t *taskManager) wait() (tasks []*task, canceled bool, canceledTasks []*tas
 		return nil, true, canceledTasks
 	}
 	if t.canceled {
-		// 已取消但未超时，等待所有任务
+		// 已中断但未超时，等待所有任务
 		tasks, canceledTasks = t.waitAll()
 		return append(tasks, ta), true, canceledTasks
 	}
@@ -550,22 +424,7 @@ func (t *taskManager) wait() (tasks []*task, canceled bool, canceledTasks []*tas
 	return []*task{ta}, t.canceled, nil
 }
 
-// waitOne 等待任意一个任务完成 - 单任务模式的核心等待逻辑
-// 返回：
-//   - ta: 完成的任务
-//   - success: 是否成功完成（包含业务错误）
-//   - canceled: 是否被取消
-//
-// 执行流程：
-//  1. 检查任务数量，若为 0 则直接返回
-//  2. 接收完成的任务：
-//     - 不可取消：直接接收（阻塞）
-//     - 可取消：使用 receive 支持中断和超时
-//  3. 更新计数器，减少运行中的任务数量
-//  4. 处理取消：返回取消状态
-//  5. 运行后置处理器：仅对无错误的任务执行
-//
-// 设计要点：区分业务错误和系统错误，业务错误不跳过后续处理
+// waitOne 等待单个任务完成
 func (t *taskManager) waitOne() (ta *task, success bool, canceled bool) {
 	if t.num == 0 {
 		return nil, false, false
@@ -592,19 +451,7 @@ func (t *taskManager) waitOne() (ta *task, success bool, canceled bool) {
 	return ta, true, false
 }
 
-// waitAll 等待所有任务完成 - 任务池模式的等待策略
-// 返回：
-//   - successTasks: 成功完成的任务列表
-//   - canceledTasks: 被取消的任务列表
-//
-// 执行逻辑：
-//  1. 循环等待直到所有任务完成
-//  2. 调用 waitOne 获取单个任务结果
-//  3. 取消处理：一旦发生取消，立即收集所有运行中任务并返回
-//  4. 失败处理：遇到失败（通常是前置处理器失败）立即返回已收集结果
-//  5. 成功累计：将成功完成的任务添加到结果列表
-//
-// 特点：保证所有任务都有结果（完成/失败/取消），不遗漏任何任务
+// waitAll 等待所有任务完成
 func (t *taskManager) waitAll() (successTasks []*task, canceledTasks []*task) {
 	result := make([]*task, 0, t.num)
 	for {
@@ -624,59 +471,28 @@ func (t *taskManager) waitAll() (successTasks []*task, canceledTasks []*task) {
 	}
 }
 
-// receive 带取消和超时的接收方法 - 统一处理多种接收场景
-// 参数：
-//   - recv: 接收函数，从 done 通道获取任务
-//
-// 返回：
-//   - ta: 接收到的任务
-//   - closed: 通道是否已关闭
-//   - canceled: 是否被取消
-//
-// 处理策略：
-//  1. 有截止时间：使用超时接收，超过截止时间则取消
-//  2. 已取消（无超时）：直接接收，不等待
-//  3. 可取消：监听取消信号，支持优雅超时取消
-//  4. 不可取消：直接接收，阻塞直到有结果
-//
-// 设计亮点：通过状态组合（deadline/canceled）灵活适配不同场景
+// receive 从通道接收任务，处理中断和超时
 func (t *taskManager) receive(recv func() (*task, bool)) (ta *task, closed bool, canceled bool) {
 	if t.deadline != nil {
-		// 已取消，在指定时间内接收
+		// 已中断，在指定时间内接收
 		return receiveWithDeadline(recv, *t.deadline)
 	}
 	if t.canceled {
-		// 取消但无超时
+		// 已中断但无超时
 		ta, closed = recv()
 		return ta, closed, false
 	}
 	if t.cancelCh != nil {
-		// 未取消，监听接收
+		// 尚未中断，监听中断信号同时接收
 		ta, closed, canceled, t.canceled, t.deadline = receiveWithListening(recv, t.cancelCh)
 		return ta, closed, canceled
 	}
-	// 不可取消
+	// 不会中断
 	ta, closed = recv()
 	return ta, closed, false
 }
 
-// receiveWithDeadline 带截止时间的接收 - 限时等待任务完成
-// 参数：
-//   - recv: 接收函数
-//   - deadline: 截止时间
-//
-// 返回：
-//   - ta: 接收到的任务（可能为 nil）
-//   - closed: 通道是否关闭
-//   - canceled: 是否超时取消
-//
-// 实现机制：
-//  1. 启动接收 goroutine 和超时计时器
-//  2. 使用 select 竞争：接收完成 vs 超时
-//  3. 先到先得：哪个先发生就返回哪个结果
-//  4. 超时处理：返回取消状态，ta 为 nil
-//
-// 适用场景：需要精确控制任务等待时间的场景
+// receiveWithDeadline 在截止时间前接收任务
 func receiveWithDeadline(recv func() (*task, bool), deadline time.Time) (ta *task, closed bool, canceled bool) {
 	now := time.Now()
 	if deadline.Before(now) {
@@ -702,27 +518,7 @@ func receiveWithDeadline(recv func() (*task, bool), deadline time.Time) (ta *tas
 	}
 }
 
-// receiveWithListening 监听取消信号的接收 - 支持优雅取消和超时控制
-// 参数：
-//   - recv: 接收函数
-//   - cancel: 取消信号通道
-//
-// 返回：
-//   - ta: 接收到的任务
-//   - closed: 通道是否关闭
-//   - canceled: 是否被取消
-//   - isCanceled: 取消标记（无超时）
-//   - deadline: 截止时间（有超时）
-//
-// 执行流程：
-//  1. 并发接收任务和监听取消信号
-//  2. 任务先完成：直接返回任务结果
-//  3. 取消信号到达：
-//     - nil 超时：标记取消，返回（不等待任务）
-//     - 有效超时：设置截止时间，继续等待
-//  4. 超时发生：返回取消状态
-//
-// 关键状态：canceled（取消标记）、deadline（超时时间）
+// receiveWithListening 接收任务的同时监听中断信号
 func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration) (*task, bool, bool, bool, *time.Time) {
 	type pair struct {
 		ta     *task
@@ -748,7 +544,7 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 		}
 		canceled = true
 		if timeout == nil {
-			// 取消但无超时
+			// 无超时的中断
 			break
 		}
 		timeoutCh = time.After(*timeout)
@@ -768,23 +564,7 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 	return p.ta, p.closed, false, canceled, nil
 }
 
-// runPreHandler 运行节点前置处理器 - 在节点执行前对输入进行预处理
-// 参数：
-//   - ta: 目标任务
-//   - runWrapper: 可执行对象调用包装器
-//
-// 返回：处理过程中的错误
-// 执行逻辑：
-//  1. panic 恢复：将前置处理器中的 panic 转换为结构化错误
-//  2. 检查跳过标记：skipPreHandler 为 true 时跳过处理
-//  3. 执行前置处理器：使用 runWrapper 调用前置处理器
-//  4. 更新输入：将处理后的输入写回任务
-//
-// 5. 错误传播：任何错误都会中断任务执行
-// 使用场景：
-//   - 字段映射：从结构体提取特定字段
-//   - 数据验证：验证输入数据的合法性
-//   - 类型转换：将外部数据转换为节点期望类型
+// runPreHandler 运行任务的前置处理器
 func runPreHandler(ta *task, runWrapper runnableCallWrapper) (err error) {
 	defer func() {
 		if e := recover(); e != nil {
@@ -801,25 +581,7 @@ func runPreHandler(ta *task, runWrapper runnableCallWrapper) (err error) {
 	return nil
 }
 
-// runPostHandler 运行节点后置处理器 - 在节点执行后对输出进行后处理
-// 参数：
-//   - ta: 目标任务
-//   - runWrapper: 可执行对象调用包装器
-//
-// 执行逻辑：
-//  1. panic 恢复：捕获后置处理器中的 panic，写入任务错误
-//  2. 执行后置处理器：使用 runWrapper 调用后置处理器
-//  3. 更新输出：将处理后的输出写回任务
-//  4. 错误处理：后置处理器错误会覆盖任务原有输出，但不中断主流程
-//
-// 设计要点：
-//   - 后置处理器错误不中断图执行，只记录在任务中
-//   - 输出仍会被更新，允许下游节点处理部分结果
-//
-// 使用场景：
-//   - 结果清理：清理敏感数据或临时资源
-//   - 指标统计：记录执行时间、内存使用等指标
-//   - 结果转换：将输出格式转换为下游节点期望格式
+// runPostHandler 运行任务的后置处理器
 func runPostHandler(ta *task, runWrapper runnableCallWrapper) {
 	defer func() {
 		if e := recover(); e != nil {
