@@ -1,13 +1,3 @@
-package compose
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/favbox/eino/internal/serialization"
-	"github.com/favbox/eino/schema"
-)
-
 /*
  * checkpoint.go - 图执行检查点系统
  *
@@ -37,7 +27,15 @@ import (
  *   - 分布式执行的状态同步
  */
 
-// ====== 内部类型注册 ======
+package compose
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/favbox/eino/internal/serialization"
+	"github.com/favbox/eino/schema"
+)
 
 func init() {
 	schema.RegisterName[*checkpoint]("_eino_checkpoint")
@@ -45,8 +43,6 @@ func init() {
 	schema.RegisterName[*pregelChannel]("_eino_pregel_channel")
 	schema.RegisterName[dependencyState]("_eino_dependency_state")
 }
-
-// ====== 核心接口定义 ======
 
 // CheckPointStore 检查点存储接口 - 定义检查点的获取和设置操作
 type CheckPointStore interface {
@@ -63,8 +59,6 @@ type Serializer interface {
 	// Unmarshal 反序列化字节数组为对象
 	Unmarshal(data []byte, v any) error
 }
-
-// ====== 配置选项函数 ======
 
 // WithCheckPointStore 设置检查点存储实现
 func WithCheckPointStore(store CheckPointStore) GraphCompileOption {

@@ -1,24 +1,21 @@
 package compose
 
 /*
- * tool_node.go - 工具节点实现
+ * tool_node.go - 工具节点实现，支持在图中执行工具调用
  *
- * 核心功能：
- *   - ToolsNode: 在图中执行工具调用的节点
- *   - 工具中间件: 支持对工具调用进行拦截和增强
- *   - 执行模式: 支持顺序执行和并行执行
- *   - 流式支持: 同时支持同步和流式工具调用
+ * 核心组件：
+ *   - ToolsNode: 工具执行节点，支持并行/顺序执行、流式/非流式调用
+ *   - ToolMiddleware: 工具调用中间件，用于拦截和增强工具执行
+ *   - ToolsNodeConfig: 工具节点配置，支持未知工具处理、参数预处理
  *
  * 设计特点：
- *   - 输入为包含 ToolCalls 的 AssistantMessage
- *   - 输出为与 ToolCalls 顺序对应的 ToolMessage 数组
- *   - 支持未知工具处理策略
- *   - 提供工具参数预处理能力
+ *   - 自动适配 InvokableTool 和 StreamableTool 两种工具类型
+ *   - 支持工具调用中断与重试机制
+ *   - 通过 ToolCallID 追踪工具调用上下文
  *
- * 与其他文件关系：
- *   - 作为 Graph 的节点类型之一
- *   - 与 tool 组件协同工作
- *   - 支持中断和重试机制
+ * 执行模式：
+ *   - Invoke: 收集所有工具调用结果后返回
+ *   - Stream: 以流式方式返回工具调用结果
  */
 
 import (
@@ -35,44 +32,44 @@ import (
 	"github.com/favbox/eino/schema"
 )
 
-// ====== 工具节点选项 ======
-
-// toolsNodeOptions 工具节点配置选项
 type toolsNodeOptions struct {
 	ToolOptions   []tool.Option
 	ToolList      []tool.BaseTool
 	executedTools map[string]string
 }
 
-// ToolsNodeOption 工具节点选项函数类型
+// ToolsNodeOption 配置 ToolsNode 的选项函数类型
 type ToolsNodeOption func(o *toolsNodeOptions)
 
-// WithToolOption 添加工具选项
+// WithToolOption 为 ToolsNode 添加工具选项
 func WithToolOption(opts ...tool.Option) ToolsNodeOption {
 	return func(o *toolsNodeOptions) {
 		o.ToolOptions = append(o.ToolOptions, opts...)
 	}
 }
 
-// WithToolList 设置工具列表
+// WithToolList 设置 ToolsNode 的工具列表
 func WithToolList(tool ...tool.BaseTool) ToolsNodeOption {
 	return func(o *toolsNodeOptions) {
 		o.ToolList = tool
 	}
 }
 
-// withExecutedTools 设置已执行工具映射
 func withExecutedTools(executedTools map[string]string) ToolsNodeOption {
 	return func(o *toolsNodeOptions) {
 		o.executedTools = executedTools
 	}
 }
 
-// ====== 工具节点核心 ======
-
-// ToolsNode 工具节点，在图中执行工具调用
-// 输入：包含 ToolCalls 的 AssistantMessage
-// 输出：与 ToolCalls 顺序对应的 ToolMessage 数组
+// ToolsNode 表示在图中执行工具调用的节点。
+//
+// Graph Node 接口定义如下：
+//
+//	Invoke(ctx context.Context, input *schema.Message, opts ...ToolsNodeOption) ([]*schema.Message, error)
+//	Stream(ctx context.Context, input *schema.Message, opts ...ToolsNodeOption) (*schema.StreamReader[[]*schema.Message], error)
+//
+// 输入为包含 []schema.ToolCall 的 schema.AssistantMessage，
+// 输出为 schema.ToolMessage 数组，元素顺序与输入中的 []schema.ToolCall 顺序一致
 type ToolsNode struct {
 	tuple                     *toolsTuple
 	unknownToolHandler        func(ctx context.Context, name, input string) (string, error)
@@ -82,66 +79,83 @@ type ToolsNode struct {
 	streamToolCallMiddlewares []StreamableToolMiddleware
 }
 
-// ====== 工具调用类型 ======
-
-// ToolInput 工具调用输入参数
+// ToolInput 工具调用的输入参数
 type ToolInput struct {
-	Name        string        // 工具名称
-	Arguments   string        // 工具调用参数
-	CallID      string        // 工具调用唯一标识
-	CallOptions []tool.Option // 工具执行选项
+	Name        string        //  待执行的工具名称
+	Arguments   string        //  工具调用的参数
+	CallID      string        //  工具调用的唯一标识符
+	CallOptions []tool.Option //  执行时的工具选项
 }
 
-// ToolOutput 工具调用输出（非流式）
+// ToolOutput 非流式工具调用的执行结果
 type ToolOutput struct {
-	Result string // 工具执行结果字符串
+	Result string //  工具执行的字符串输出
 }
 
-// StreamToolOutput 工具调用输出（流式）
+// StreamToolOutput 流式工具调用的执行结果
 type StreamToolOutput struct {
 	Result *schema.StreamReader[string] // 工具流式输出
 }
 
-// ====== 工具端点和中间件 ======
-
-// InvokableToolEndpoint 可调用工具端点函数类型
 type InvokableToolEndpoint func(ctx context.Context, input *ToolInput) (*ToolOutput, error)
 
-// StreamableToolEndpoint 可流式工具端点函数类型
 type StreamableToolEndpoint func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error)
 
-// InvokableToolMiddleware 可调用工具中间件，用于拦截和增强非流式工具调用
+// InvokableToolMiddleware 包装 InvokableToolEndpoint 以添加自定义处理逻辑的函数。
+// 可用于拦截、修改或增强非流式工具的执行
 type InvokableToolMiddleware func(InvokableToolEndpoint) InvokableToolEndpoint
 
-// StreamableToolMiddleware 可流式工具中间件，用于拦截和增强流式工具调用
+// StreamableToolMiddleware 包装 StreamableToolEndpoint 以添加自定义处理逻辑的函数。
+// 可用于拦截、修改或增强流式工具的执行
 type StreamableToolMiddleware func(StreamableToolEndpoint) StreamableToolEndpoint
 
 // ToolMiddleware 工具中间件，支持同步和流式工具调用
 type ToolMiddleware struct {
-	Invokable  InvokableToolMiddleware  // 非流式工具调用中间件
-	Streamable StreamableToolMiddleware // 流式工具调用中间件
+	// Invokable 非流式工具调用的中间件函数
+	// 注意：仅适用于实现了 InvokableTool 接口的工具
+	Invokable InvokableToolMiddleware
+
+	// Streamable 流式工具调用的中间件函数
+	// 注意：仅适用于实现了 StreamableTool 接口的工具
+	Streamable StreamableToolMiddleware
 }
 
-// ToolsNodeConfig 工具节点配置
+// ToolsNodeConfig ToolsNode 的配置
 type ToolsNodeConfig struct {
-	Tools []tool.BaseTool // 工具列表，支持 InvokableTool 或 StreamableTool 接口
+	// Tools 可调用的工具列表，类型为 BaseTool 但必须实现 InvokableTool 或 StreamableTool
+	Tools []tool.BaseTool
 
-	// UnknownToolsHandler 未知工具处理器，用于处理 LLM 幻觉调用的不存在工具
-	// 可选字段，未设置时调用不存在工具会返回错误
-	// 设置后，LLM 调用不在工具列表中的工具时将调用此处理器
+	// UnknownToolsHandler 处理 LLM 幻觉时调用不存在工具的情况。
+	// 此字段可选，未设置时调用不存在的工具会返回错误。
+	// 设置后，当 LLM 尝试调用 Tools 列表中不存在的工具时，
+	// 会调用此处理器而非返回错误，从而优雅地处理幻觉工具。
+	//
+	// 参数 ctx 为工具调用的上下文，name 为不存在的工具名称，input 为 LLM 生成的工具调用输入。
+	// 返回模拟工具执行的响应字符串和处理过程中的错误
 	UnknownToolsHandler func(ctx context.Context, name, input string) (string, error)
 
-	ExecuteSequentially bool // 执行模式：true=顺序执行，false=并行执行（默认）
+	// ExecuteSequentially 决定工具调用是顺序执行还是并行执行。
+	// 设为 true 时，工具调用按输入消息中出现的顺序依次执行。
+	// 设为 false（默认）时，工具调用并行执行
+	ExecuteSequentially bool
 
-	// ToolArgumentsHandler 工具参数处理器，用于在执行前预处理工具参数
+	// ToolArgumentsHandler 在执行前处理工具参数。
+	// 设置后，每次工具调用都会调用此函数处理参数。
+	//
+	// 参数 ctx 为工具调用的上下文，name 为被调用工具的名称，arguments 为原始参数字符串。
+	// 返回用于工具执行的处理后参数字符串和预处理过程中的错误
 	ToolArgumentsHandler func(ctx context.Context, name, arguments string) (string, error)
 
-	ToolCallMiddlewares []ToolMiddleware // 工具调用中间件配置
+	// ToolCallMiddlewares 配置工具调用的中间件。
+	// 每个元素可包含 Invokable 和/或 Streamable 中间件。
+	// Invokable 中间件仅适用于实现 InvokableTool 接口的工具，
+	// Streamable 中间件仅适用于实现 StreamableTool 接口的工具
+	ToolCallMiddlewares []ToolMiddleware
 }
 
-// NewToolNode 创建新的工具节点实例。
+// NewToolNode 创建新的 ToolsNode。
 //
-// e.g.
+// 示例：
 //
 //	conf := &ToolsNodeConfig{
 //		Tools: []tool.BaseTool{invokableTool1, streamableTool2},
@@ -538,8 +552,8 @@ func parallelRunToolCall(ctx context.Context,
 	wg.Wait()
 }
 
-// Invoke 同步执行工具调用，收集可调用工具的结果
-// 如果输入消息中有多个工具调用，将并行执行
+// Invoke 调用工具并收集可调用工具的结果。
+// 输入消息中有多个工具调用时并行执行
 func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	opts ...ToolsNodeOption) ([]*schema.Message, error) {
 
@@ -598,8 +612,8 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	return output, nil
 }
 
-// Stream 流式执行工具调用，收集流式读取器的结果
-// 如果输入消息中有多个工具调用，将并行执行
+// Stream 调用工具并收集流式读取器的结果。
+// 输入消息中有多个工具调用时并行执行
 func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	opts ...ToolsNodeOption) (*schema.StreamReader[[]*schema.Message], error) {
 
@@ -708,7 +722,7 @@ func setToolCallInfo(ctx context.Context, toolCallInfo *toolCallInfo) context.Co
 	return context.WithValue(ctx, toolCallInfoKey{}, toolCallInfo)
 }
 
-// GetToolCallID gets the current tool call id from the context.
+// GetToolCallID 从上下文中获取当前工具调用 ID
 func GetToolCallID(ctx context.Context) string {
 	v := ctx.Value(toolCallInfoKey{})
 	if v == nil {
