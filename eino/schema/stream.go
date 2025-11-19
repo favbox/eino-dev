@@ -1,3 +1,22 @@
+/*
+ * stream.go - 流式数据处理核心实现
+ *
+ * 核心组件：
+ *   - StreamReader/StreamWriter: 基于通道的流读写，支持异步数据传输
+ *   - StreamReaderFromArray: 从数组创建流，支持统一的流式访问接口
+ *   - MergeStreamReaders: 合并多个流，支持并发读取多个数据源
+ *   - StreamReaderWithConvert: 流转换器，支持类型转换和数据过滤
+ *   - MergeNamedStreamReaders: 命名流合并，支持追踪各源流的状态
+ *
+ * 设计特点：
+ *   - 统一接口: 提供一致的 Recv/Close API，支持多种流实现
+ *   - 零拷贝复制: Copy 方法创建独立读取器，共享底层数据
+ *   - 自动资源管理: SetAutomaticClose 支持 GC 时自动清理
+ *   - 错误追踪: SourceEOF 错误支持追踪命名流的结束状态
+ *   - 并发安全: 支持多读取器并发访问同一流数据
+ *   - 类型转换: StreamReaderWithConvert 支持链式转换和过滤
+ */
+
 package schema
 
 import (
@@ -13,221 +32,40 @@ import (
 	"github.com/favbox/eino/internal/safe"
 )
 
-// === Layer 1: 公开API层 (用户立即看到) ===
-
-// ========================================
-// Layer 1: 公开API层 (用户立即看到)
-// ========================================
-
-// 1.1 创建类函数
-
-// Pipe 创建指定容量的流，返回流写入器和流读取器。
-// 容量表示流中可缓冲的最大数据项数量。
+// ErrNoValue 在 StreamReaderWithConvert 中用于跳过某个 streamItem，将其从转换后的流中排除。
+// 例如：
 //
-// 示例:
+//	outStream = schema.StreamReaderWithConvert(s,
+//		func(src string) (string, error) {
+//			if len(src) == 0 {
+//				return "", schema.ErrNoValue
+//			}
+//			return src.Message, nil
+//		})
 //
-//	sr, sw := schema.Pipe[string](3)
-//	go func() { // 发送数据
-//	        defer sw.Close()
-//	        for i := 0; i < 10; i++ {
-//	                sw.Send(i, nil)
-//	        }
-//	}
+// outStream 将过滤掉空字符串。
 //
-//	defer sr.Close()
-//	for chunk, err := sr.Recv() {
-//	        if errors.Is(err, io.EOF) {
-//	                break
-//	        }
-//	        fmt.Println(chunk)
-//	}
-func Pipe[T any](cap int) (*StreamReader[T], *StreamWriter[T]) {
-	stm := newStream[T](cap)
-	return stm.asReader(), &StreamWriter[T]{stm: stm}
+// 注意：不要在其他情况下使用此错误。
+var ErrNoValue = errors.New("no value")
+
+// ErrRecvAfterClosed 表示在调用 StreamReader.Close 之后意外调用了 StreamReader.Recv。
+// 此错误不应在正常使用 StreamReader.Recv 时出现。如果出现，请检查应用程序代码。
+var ErrRecvAfterClosed = errors.New("recv after stream closed")
+
+// SourceEOF 表示来自特定源流的 EOF 错误。
+// 仅当使用 MergeNamedStreamReaders 创建的 StreamReader 的某个源流到达 EOF 时，
+// 其 Recv() 方法才会返回此错误。
+type SourceEOF struct {
+	sourceName string
 }
 
-// StreamReaderFromArray 从给定数组创建流读取器。
-// 允许以流的方式控制数组元素的读取。
-//
-// 示例：
-//
-//	sr := schema.StreamReaderFromArray([]int{1, 2, 3})
-//	defer sr.close()
-//
-//	for chunk, err := sr.Recv() {
-//		fmt.Println(chunk)
-//	}
-func StreamReaderFromArray[T any](arr []T) *StreamReader[T] {
-	return &StreamReader[T]{ar: &arrayReader[T]{arr: arr}, typ: readerTypeArray}
+func (e *SourceEOF) Error() string {
+	return fmt.Sprintf("EOF from source stream: %s", e.sourceName)
 }
-
-// 1.2 合并类函数
-
-// MergeStreamReaders 合并多个流读取器为一个。
-// 将多个数据源统一为单一的流接口，便于并发处理。
-//
-// 示例:
-//
-//	sr1, sr2 := schema.Pipe[string](2)
-//	defer sr1.Close()
-//	defer sr2.Close()
-//
-//	sr := schema.MergeStreamReaders([]*schema.StreamReader[string]{sr1, sr2})
-//
-//	defer sr.Close()
-//	for chunk, err := sr.Recv() {
-//	        fmt.Println(chunk)
-//	}
-func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
-	if len(srs) < 1 {
-		return nil
-	}
-
-	if len(srs) < 2 {
-		return srs[0]
-	}
-
-	var arr []T
-	var ss []*stream[T]
-
-	// 根据读取器类型分别处理
-	for _, sr := range srs {
-		switch sr.typ {
-		case readerTypeStream:
-			ss = append(ss, sr.st)
-		case readerTypeArray:
-			arr = append(arr, sr.ar.arr[sr.ar.index:]...)
-		case readerTypeMultiStream:
-			ss = append(ss, sr.msr.nonClosedStreams()...)
-		case readerTypeWithConvert:
-			ss = append(ss, sr.srw.toStream())
-		case readerTypeChild:
-			ss = append(ss, sr.csr.toStream())
-		default:
-			panic("不可能的情况")
-		}
-	}
-
-	// 只有数组类型，直接返回数组读取器
-	if len(ss) == 0 {
-		return &StreamReader[T]{
-			typ: readerTypeArray,
-			ar: &arrayReader[T]{
-				arr:   arr,
-				index: 0,
-			},
-		}
-	}
-
-	// 同时存在数组和其他类型，将数组转为流后合并
-	if len(arr) != 0 {
-		s := arrToStream(arr)
-		ss = append(ss, s)
-	}
-
-	return &StreamReader[T]{
-		typ: readerTypeMultiStream,
-		msr: newMultiStreamReader(ss),
-	}
-}
-
-// MergeNamedStreamReaders 合并多个命名流读取器，保留源流名称。
-// 当某个源流结束时，合并流将返回包含该源流名称的 SourceEOF 错误。
-// 适用于需要跟踪哪个源流已完成的场景。
-//
-// 示例:
-//
-//	sr1, sw1 := schema.Pipe[string](2)
-//	sr2, sw2 := schema.Pipe[string](2)
-//
-//	namedStreams := map[string]*StreamReader[string]{
-//	        "stream1": sr1,
-//	        "stream2": sr2,
-//	}
-//
-//	mergedSR := schema.MergeNamedStreamReaders(namedStreams)
-//	defer mergedSR.Close()
-//
-//	for {
-//	        chunk, err := mergedSR.Recv()
-//	        if err != nil {
-//	                if sourceName, ok := schema.GetSourceName(err); ok {
-//	                        fmt.Printf("流 %s 已结束\n", sourceName)
-//	                        continue
-//	                }
-//	                if errors.Is(err, io.EOF) {
-//	                        break // 所有流都已结束
-//	                }
-//	                // 处理其他错误
-//	        }
-//	        fmt.Println(chunk)
-//	}
-func MergeNamedStreamReaders[T any](srs map[string]*StreamReader[T]) *StreamReader[T] {
-	if len(srs) < 1 {
-		return nil
-	}
-
-	ss := make([]*StreamReader[T], len(srs))
-	names := make([]string, len(srs))
-
-	i := 0
-	for name, sr := range srs {
-		ss[i] = sr
-		names[i] = name
-		i++
-	}
-
-	return InternalMergeNamedStreamReaders(ss, names)
-}
-
-// InternalMergeNamedStreamReaders 内部命名流合并函数。
-// 将流读取器和名称列表转换为命名多流读取器。
-func InternalMergeNamedStreamReaders[T any](srs []*StreamReader[T], names []string) *StreamReader[T] {
-	ss := make([]*stream[T], len(srs))
-
-	// 将所有流读取器转换为底层流对象
-	for i, sr := range srs {
-		ss[i] = sr.toStream()
-	}
-
-	// 创建多流读取器并设置源流名称
-	msr := newMultiStreamReader(ss)
-	msr.sourceReaderNames = names
-
-	return &StreamReader[T]{
-		typ: readerTypeMultiStream,
-		msr: msr,
-	}
-}
-
-// 1.3 转换类函数
-
-// StreamReaderWithConvert 将流读取器转换为另一种类型的流读取器。
-//
-// 示例：
-//
-//	intReader := StreamReaderFromArray([]int{1, 2, 3})
-//	stringReader := StreamReaderWithConvert(sr, func(i int) (string, error) {
-//		return fmt.Sprintf("val_%d", i), nil
-//	})
-//
-// defer stringReader.Close() // 使用 Recv() 时必须关闭，否则可能导致内存/协程泄露
-//
-//	s, err := stringReader.Recv()
-//	fmt.Println(s) // 输出：val_1
-func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error)) *StreamReader[D] {
-	c := func(a any) (D, error) {
-		return convert(a.(T))
-	}
-
-	return newStreamReaderWithConvert(sr, c)
-}
-
-// 1.4 工具类函数
 
 // GetSourceName 从 SourceEOF 错误中提取源流名称。
-// 返回源流名称和是否为 SourceEOF 错误的布尔值。
-// 非SourceEOF 错误返回空字符串和 false。
+// 返回源流名称和一个布尔值，指示该错误是否为 SourceEOF。
+// 如果错误不是 SourceEOF，则返回空字符串和 false。
 func GetSourceName(err error) (string, bool) {
 	var sErr *SourceEOF
 	if errors.As(err, &sErr) {
@@ -237,36 +75,81 @@ func GetSourceName(err error) (string, bool) {
 	return "", false
 }
 
-// === Layer 2: 核心类型定义层 ===
-
-// 2.1 核心接口
-
-// reader 流读取器接口，定义了基本的读取和关闭操作。
-type reader[T any] interface {
-	recv() (T, error) // 接收数据
-	close()           // 关闭读取器
-}
-
-// iStreamReader 内部流读取器接口，使用 any 类型支持异构数据处理。
-type iStreamReader interface {
-	recvAny() (any, error)       // 接收任意类型的数据
-	copyAny(int) []iStreamReader // 创建指定数量的读取器副本
-	Close()                      // 关闭读取器
-	SetAutomaticClose()          // 设置自动关闭模式
-}
-
-// 2.2 核心结构体
-
-// StreamReader 流数据接收器。
-// 由 Pipe 函数创建，用于从流中读取数据。
-//
-// 示例：
+// Pipe 创建一个具有给定容量的新流，由 StreamWriter 和 StreamReader 表示。
+// 容量是流中可缓冲的最大项数。
+// 例如：
 //
 //	sr, sw := schema.Pipe[string](3)
-//	// 发送数据的代码省略
-//	// 通常 reader 由函数返回，在另一个函数中使用
+//	go func() { // 发送数据
+//		defer sw.Close()
+//		for i := 0; i < 10; i++ {
+//			sw.Send(fmt.Sprintf("item_%d", i), nil)
+//		}
+//	}()
 //
-//	for chunk, err := sr.Recv() {
+//	defer sr.Close()
+//	for {
+//		chunk, err := sr.Recv()
+//		if errors.Is(err, io.EOF) {
+//			break
+//		}
+//		fmt.Println(chunk)
+//	}
+func Pipe[T any](cap int) (*StreamReader[T], *StreamWriter[T]) {
+	stm := newStream[T](cap)
+	return stm.asReader(), &StreamWriter[T]{stm: stm}
+}
+
+// StreamWriter 是流的发送端。
+// 通过 Pipe 函数创建。
+// 例如：
+//
+//	sr, sw := schema.Pipe[string](3)
+//	go func() { // 发送数据
+//		defer sw.Close()
+//		for i := 0; i < 10; i++ {
+//			sw.Send(fmt.Sprintf("item_%d", i), nil)
+//		}
+//	}()
+type StreamWriter[T any] struct {
+	stm *stream[T]
+}
+
+// Send 向流发送一个值。
+// 例如：
+//
+//	closed := sw.Send(item, nil)
+//	if closed {
+//		// 流已关闭
+//	}
+func (sw *StreamWriter[T]) Send(chunk T, err error) (closed bool) {
+	return sw.stm.send(chunk, err)
+}
+
+// Close 通知接收端流发送已完成。
+// 流接收端将从 StreamReader.Recv() 收到 io.EOF 错误。
+// 注意：发送所有数据后务必调用 Close()。
+// 例如：
+//
+//	defer sw.Close()
+//	for i := 0; i < 10; i++ {
+//		sw.Send(item, nil)
+//	}
+func (sw *StreamWriter[T]) Close() {
+	sw.stm.closeSend()
+}
+
+// StreamReader 是流的接收端。
+// 通过 Pipe 函数创建。
+// 例如：
+//
+//	sr, sw := schema.Pipe[string](3)
+//	// 省略发送数据的代码
+//	// 大多数情况下，reader 由函数返回，并在另一个函数中使用。
+//
+//	defer sr.Close()
+//	for {
+//		chunk, err := sr.Recv()
 //		if errors.Is(err, io.EOF) {
 //			break
 //		}
@@ -289,32 +172,11 @@ type StreamReader[T any] struct {
 	csr *childStreamReader[T]
 }
 
-// StreamWriter 流数据发送器。
-// 由 Pipe 函数创建，用于向流中发送数据。
+// Recv 从流接收一个值。
+// 例如：
 //
-// 示例:
-//
-//	sr, sw := schema.Pipe[string](3)
-//	go func() { // 发送数据
-//	        defer sw.Close()
-//	        for i := 0; i < 10; i++ {
-//	                sw.Send(i, nil)
-//	        }
-//	}
-type StreamWriter[T any] struct {
-	stm *stream[T] // 底层流对象
-}
-
-// === Layer 3: 类型方法层 ===
-
-// 3.1 StreamReader 方法 (按使用频率排序)
-
-// Recv 从流中接收数据。
-// 根据读取器类型调用相应的接收方法。
-//
-// 示例:
-//
-//	for chunk, err := sr.Recv() {
+//	for {
+//		chunk, err := sr.Recv()
 //		if errors.Is(err, io.EOF) {
 //			break
 //		}
@@ -336,19 +198,19 @@ func (sr *StreamReader[T]) Recv() (T, error) {
 	case readerTypeChild:
 		return sr.csr.recv()
 	default:
-		panic("不可能的情况")
+		panic("impossible")
 	}
 }
 
-// Close 安全关闭流读取器。
-// 只应调用一次，多次调用可能导致意外行为。
-// 注意：使用 Recv() 后务必记得调用 Close()。
-//
-// 示例:
+// Close 安全地关闭 StreamReader。
+// 应该只调用一次，因为多次调用可能无法按预期工作。
+// 注意：使用 Recv() 后务必调用 Close()。
+// 例如：
 //
 //	defer sr.Close()
 //
-//	for chunk, err := sr.Recv() {
+//	for {
+//		chunk, err := sr.Recv()
 //		if errors.Is(err, io.EOF) {
 //			break
 //		}
@@ -359,7 +221,7 @@ func (sr *StreamReader[T]) Close() {
 	case readerTypeStream:
 		sr.st.closeRecv()
 	case readerTypeArray:
-		// 数组读取器无需关闭
+
 	case readerTypeMultiStream:
 		sr.msr.close()
 	case readerTypeWithConvert:
@@ -367,16 +229,14 @@ func (sr *StreamReader[T]) Close() {
 	case readerTypeChild:
 		sr.csr.close()
 	default:
-		panic("不可能的情况")
+		panic("impossible")
 	}
 }
 
-// Copy 复制流读取器，使多个消费者能同时读取同一数据源。
-// 原始流读取器复制后将不可用。
-//
-// 应用场景：并发处理、数据分发、流水线处理
-//
-// 示例:
+// Copy 创建新的 StreamReader 切片。
+// 副本数量由参数 n 指定，应为非零正整数。
+// 调用 Copy 后原始 StreamReader 将不可用。
+// 例如：
 //
 //	sr := schema.StreamReaderFromArray([]int{1, 2, 3})
 //	srs := sr.Copy(2)
@@ -404,9 +264,8 @@ func (sr *StreamReader[T]) Copy(n int) []*StreamReader[T] {
 	return copyStreamReaders[T](sr, n)
 }
 
-// SetAutomaticClose 设置流读取器为自动关闭模式。
-// 当流读取器不可达且准备被 GC 回收时自动关闭。
-// 注意：非并发安全。
+// SetAutomaticClose 设置 StreamReader 在不再可达且准备被 GC 时自动关闭。
+// 非并发安全。
 func (sr *StreamReader[T]) SetAutomaticClose() {
 	switch sr.typ {
 	case readerTypeStream:
@@ -435,19 +294,15 @@ func (sr *StreamReader[T]) SetAutomaticClose() {
 	case readerTypeWithConvert:
 		sr.srw.sr.SetAutomaticClose()
 	case readerTypeArray:
-		// 数组流无需自动清理
+		// no need to clean up
 	default:
 	}
 }
 
-// recvAny 以 any 类型接收数据。
-// 内部调用泛型版本的 Recv() 方法。
 func (sr *StreamReader[T]) recvAny() (any, error) {
 	return sr.Recv()
 }
 
-// copyAny 以 iStreamReader 接口类型创建流读取器副本。
-// 内部调用泛型版本的 Copy() 方法并转换为接口类型。
 func (sr *StreamReader[T]) copyAny(n int) []iStreamReader {
 	ret := make([]iStreamReader, n)
 
@@ -460,8 +315,16 @@ func (sr *StreamReader[T]) copyAny(n int) []iStreamReader {
 	return ret
 }
 
-// toStream 将流读取器转换为底层流对象。
-// 根据读取器类型调用相应的转换方法。
+func arrToStream[T any](arr []T) *stream[T] {
+	s := newStream[T](len(arr))
+	for i := range arr {
+		s.send(arr[i], nil)
+	}
+	s.closeSend()
+
+	return s
+}
+
 func (sr *StreamReader[T]) toStream() *stream[T] {
 	switch sr.typ {
 	case readerTypeStream:
@@ -475,109 +338,44 @@ func (sr *StreamReader[T]) toStream() *stream[T] {
 	case readerTypeChild:
 		return sr.csr.toStream()
 	default:
-		panic("不可能的情况")
+		panic("impossible")
 	}
 }
 
-// 3.2 StreamWriter 方法
-
-// Send 向流中发送数据。
-// 返回值表示流是否已关闭。
-//
-// 示例:
-//
-//	closed := sw.Send(i, nil)
-//	if closed {
-//	        // 流已关闭
-//	}
-func (sw *StreamWriter[T]) Send(chunk T, err error) (closed bool) {
-	return sw.stm.send(chunk, err)
-}
-
-// Close 关闭流的发送端，通知接收者发送已完成。
-// 接收者将从 StreamReader.Recv() 收到 io.EOF 错误。
-// 注意：发送完所有数据后务必记得调用 Close()。
-//
-// 示例:
-//
-//	defer sw.Close()
-//	for i := 0; i < 10; i++ {
-//	        sw.Send(i, nil)
-//	}
-func (sw *StreamWriter[T]) Close() {
-	sw.stm.closeSend()
-}
-
-// === Layer 4: 内部实现层 ===
-
-// 4.1 错误和常量定义
-
-// ErrNoValue 用于 StreamReaderWithConvert 中跳过流数据项。
-// 在转换函数中返回此错误会从转换后的流中排除该项。
-//
-// 示例：
-//
-//	outStream := schema.StreamReaderWithConvert(s,
-//		func(src string) (string, error) {
-//			if len(src) == 0 {
-//				return "", schema.ErrNoValue
-//			}
-//
-//			return src.Message, nil
-//		})
-//
-//	outStream 将过滤掉空字符串。
-//
-// 请勿在其他情况下使用。
-var ErrNoValue = errors.New("无有效值")
-
-// ErrRecvAfterClosed 表示在流关闭后意外调用了接收操作。
-// 正常使用情况下不应出现此错误，如出现请检查应用代码。
-var ErrRecvAfterClosed = errors.New("流关闭后接收数据")
-
-// SourceEOF 表示特定源流结束的错误。
-// 仅在 MergeNamedStreamReaders 创建的 StreamReader 的 Recv() 方法中返回。
-type SourceEOF struct {
-	sourceName string // 源流名称
-}
-
-func (e *SourceEOF) Error() string {
-	return fmt.Sprintf("源流 %s 已结束", e.sourceName)
-}
-
-// readerType 表示流读取器的类型
 type readerType int
 
 const (
-	readerTypeStream      readerType = iota // 基础流读取器
-	readerTypeArray                         // 数组读取器
-	readerTypeMultiStream                   // 多流读取器
-	readerTypeWithConvert                   // 带转换的读取器
+	readerTypeStream readerType = iota
+	readerTypeArray
+	readerTypeMultiStream
+	readerTypeWithConvert
 	readerTypeChild
 )
 
-// 4.2 底层流实现
-
-// stream 基于 channel 的底层流，支持 1 个发送者和 1 个接收者。
-// 发送者调用 closeSend() 通知接收者流已结束，接收者调用 closeRecv() 通知发送者停止接收。
-type stream[T any] struct {
-	items chan streamItem[T] // 数据传输通道
-
-	closed chan struct{} // 关闭信号通道
-
-	automaticClose bool    // 是否启用自动关闭模式
-	closedFlag     *uint32 // 关闭标志：0=未关闭，1=已关闭（仅在自动关闭模式下使用）
+type iStreamReader interface {
+	recvAny() (any, error)
+	copyAny(int) []iStreamReader
+	Close()
+	SetAutomaticClose()
 }
 
-// streamItem 流中的数据项，包含数据块和可能的错误。
+// stream 是基于通道的流，具有 1 个发送者和 1 个接收者。
+// 发送者调用 closeSend() 通知接收者流发送已完成。
+// 接收者调用 closeRecv() 通知发送者接收者停止接收。
+type stream[T any] struct {
+	items chan streamItem[T]
+
+	closed chan struct{}
+
+	automaticClose bool
+	closedFlag     *uint32 // 0 = not closed, 1 = closed, only used when automaticClose is set
+}
+
 type streamItem[T any] struct {
 	chunk T
 	err   error
 }
 
-// stream 方法
-
-// newStream 创建指定容量的新流。
 func newStream[T any](cap int) *stream[T] {
 	return &stream[T]{
 		items:  make(chan streamItem[T], cap),
@@ -585,13 +383,10 @@ func newStream[T any](cap int) *stream[T] {
 	}
 }
 
-// asReader 将流转换为流读取器。
 func (s *stream[T]) asReader() *StreamReader[T] {
 	return &StreamReader[T]{typ: readerTypeStream, st: s}
 }
 
-// recv 从流中接收数据块。
-// 流已关闭：返回 io.EOF 错误；正常情况：返回数据块和可能的错误。
 func (s *stream[T]) recv() (chunk T, err error) {
 	item, ok := <-s.items
 
@@ -602,10 +397,8 @@ func (s *stream[T]) recv() (chunk T, err error) {
 	return item.chunk, item.err
 }
 
-// send 向流中发送数据块。
-// 流已关闭：返回 true；发送成功：返回 false
 func (s *stream[T]) send(chunk T, err error) (closed bool) {
-	// 流已关闭时立即返回
+	// if the stream is closed, return immediately
 	select {
 	case <-s.closed:
 		return true
@@ -622,13 +415,10 @@ func (s *stream[T]) send(chunk T, err error) (closed bool) {
 	}
 }
 
-// closeSend 关闭流的发送端，通知接收者流已结束。
 func (s *stream[T]) closeSend() {
 	close(s.items)
 }
 
-// closeRecv 关闭流的接收端，通知发送者停止接收。
-// 自动关闭模式：使用原子操作确保只关闭一次；普通模式：直接关闭
 func (s *stream[T]) closeRecv() {
 	if s.automaticClose {
 		if atomic.CompareAndSwapUint32(s.closedFlag, 0, 1) {
@@ -640,18 +430,30 @@ func (s *stream[T]) closeRecv() {
 	close(s.closed)
 }
 
-// 4.3 具体读取器实现
-
-// 基于数组的读取器，顺序读取数组元素
-type arrayReader[T any] struct {
-	arr   []T // 源数组
-	index int // 当前读取位置
+// StreamReaderFromArray 从给定的元素切片创建 StreamReader。
+// 接受类型 T 的数组，返回指向 StreamReader[T] 的指针。
+// 这允许以受控方式流式传输数组元素。
+// 例如：
+//
+//	sr := schema.StreamReaderFromArray([]int{1, 2, 3})
+//	defer sr.Close()
+//
+//	for {
+//		chunk, err := sr.Recv()
+//		if errors.Is(err, io.EOF) {
+//			break
+//		}
+//		fmt.Println(chunk)
+//	}
+func StreamReaderFromArray[T any](arr []T) *StreamReader[T] {
+	return &StreamReader[T]{ar: &arrayReader[T]{arr: arr}, typ: readerTypeArray}
 }
 
-// arrayReader 方法
+type arrayReader[T any] struct {
+	arr   []T
+	index int
+}
 
-// recv 从数组中读取下一个元素。
-// 有元素：返回元素和 nil；无元素：返回零值和 io.EOF
 func (ar *arrayReader[T]) recv() (T, error) {
 	if ar.index < len(ar.arr) {
 		ret := ar.arr[ar.index]
@@ -664,8 +466,6 @@ func (ar *arrayReader[T]) recv() (T, error) {
 	return t, io.EOF
 }
 
-// copy 创建指定数量的读取器副本。
-// 所有副本共享源数组，但维护独立的读取位置
 func (ar *arrayReader[T]) copy(n int) []*arrayReader[T] {
 	ret := make([]*arrayReader[T], n)
 
@@ -679,24 +479,25 @@ func (ar *arrayReader[T]) copy(n int) []*arrayReader[T] {
 	return ret
 }
 
-// toStream 将剩余数组元素转换为流。
-// 从当前读取位置开始创建新的流
 func (ar *arrayReader[T]) toStream() *stream[T] {
 	return arrToStream(ar.arr[ar.index:])
 }
 
-// multiStreamReader 多流读取器，同时从多个流中读取数据。
-type multiStreamReader[T any] struct {
-	sts               []*stream[T]         // 源流列表
-	itemsCases        []reflect.SelectCase // reflect.Select 的 case 列表
-	nonClosed         []int                // 未关闭流的索引列表
-	sourceReaderNames []string             // 源读取器名称列表
+type multiArrayReader[T any] struct {
+	ars   []*arrayReader[T]
+	index int
 }
 
-// multiStreamReader 方法
+type multiStreamReader[T any] struct {
+	sts []*stream[T]
 
-// newMultiStreamReader 创建多流读取器。
-// 流数量超过阈值时使用 reflect.Select 优化性能
+	itemsCases []reflect.SelectCase
+
+	nonClosed []int
+
+	sourceReaderNames []string
+}
+
 func newMultiStreamReader[T any](sts []*stream[T]) *multiStreamReader[T] {
 	var itemsCases []reflect.SelectCase
 	if len(sts) > maxSelectNum {
@@ -721,8 +522,6 @@ func newMultiStreamReader[T any](sts []*stream[T]) *multiStreamReader[T] {
 	}
 }
 
-// recv 从多个流中读取数据。
-// 有数据：返回数据块和 nil；流关闭：移除该流；所有流关闭：返回 io.EOF
 func (msr *multiStreamReader[T]) recv() (T, error) {
 	for len(msr.nonClosed) > 0 {
 		var chosen int
@@ -743,7 +542,7 @@ func (msr *multiStreamReader[T]) recv() (T, error) {
 			}
 		}
 
-		// 移除已关闭的流
+		// delete the closed stream
 		for i := range msr.nonClosed {
 			if msr.nonClosed[i] == chosen {
 				msr.nonClosed = append(msr.nonClosed[:i], msr.nonClosed[i+1:]...)
@@ -761,7 +560,6 @@ func (msr *multiStreamReader[T]) recv() (T, error) {
 	return t, io.EOF
 }
 
-// nonClosedStreams 获取未关闭的流列表。
 func (msr *multiStreamReader[T]) nonClosedStreams() []*stream[T] {
 	ret := make([]*stream[T], len(msr.nonClosed))
 
@@ -772,26 +570,21 @@ func (msr *multiStreamReader[T]) nonClosedStreams() []*stream[T] {
 	return ret
 }
 
-// close 关闭所有流的接收端。
 func (msr *multiStreamReader[T]) close() {
 	for _, s := range msr.sts {
 		s.closeRecv()
 	}
 }
 
-// toStream 将多流读取器转换为流。
 func (msr *multiStreamReader[T]) toStream() *stream[T] {
 	return toStream[T, *multiStreamReader[T]](msr)
 }
 
-// streamReaderWithConvert 带转换功能的流读取器。
-// 将原始流数据通过转换函数转换为目标类型
 type streamReaderWithConvert[T any] struct {
-	sr      iStreamReader        // 原始流读取器
-	convert func(any) (T, error) // 转换函数
-}
+	sr iStreamReader
 
-// streamReaderWithConvert 方法
+	convert func(any) (T, error)
+}
 
 func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (T, error)) *StreamReader[T] {
 	srw := &streamReaderWithConvert[T]{
@@ -805,8 +598,26 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 	}
 }
 
-// recv 接收并转换流数据。
-// 转换成功：返回转换后的数据；转换失败：处理错误并继续尝试
+// StreamReaderWithConvert 将流读取器转换为另一个流读取器。
+//
+// 例如：
+//
+//	intReader := StreamReaderFromArray([]int{1, 2, 3})
+//	stringReader := StreamReaderWithConvert(intReader, func(i int) (string, error) {
+//		return fmt.Sprintf("val_%d", i), nil
+//	})
+//
+//	defer stringReader.Close() // 如果使用 Recv()，务必关闭 reader，否则可能导致内存/协程泄漏。
+//	s, err := stringReader.Recv()
+//	fmt.Println(s) // 输出: val_1
+func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error)) *StreamReader[D] {
+	c := func(a any) (D, error) {
+		return convert(a.(T))
+	}
+
+	return newStreamReaderWithConvert(sr, c)
+}
+
 func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 	for {
 		out, err := srw.sr.recvAny()
@@ -818,7 +629,7 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 
 		t, err := srw.convert(out)
 		if err == nil {
-			return t, err
+			return t, nil
 		}
 
 		if !errors.Is(err, ErrNoValue) {
@@ -827,157 +638,20 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 	}
 }
 
-// close 关闭原始流读取器。
 func (srw *streamReaderWithConvert[T]) close() {
 	srw.sr.Close()
 }
 
-// toStream 将带转换功能的读取器转换为流。
-func (srw *streamReaderWithConvert[T]) toStream() *stream[T] {
-	return toStream[T, *streamReaderWithConvert[T]](srw)
+type reader[T any] interface {
+	recv() (T, error)
+	close()
 }
 
-// parentStreamReader 父流读取器，管理多个子流读取器的数据分发。
-type parentStreamReader[T any] struct {
-	// sr 原始流读取器
-	sr *StreamReader[T]
-
-	// subStreamList 将每个子流索引映射到其最新读取的数据块
-	// 每个值来自隐藏的 cpStreamElement 链表
-	subStreamList []*cpStreamElement[T]
-
-	// closedNum 已关闭的子流数量
-	closedNum uint32
-}
-
-// childStreamReader 子流读取器，作为父流读取器的子集。
-type childStreamReader[T any] struct {
-	parent *parentStreamReader[T] // 父流读取器
-	index  int                    // 子流索引
-}
-
-// cpStreamElement 复制流链表中的元素节点，属于子流链表。
-type cpStreamElement[T any] struct {
-	once sync.Once           // 确保元素只被处理一次
-	next *cpStreamElement[T] // 下一个元素节点
-	item streamItem[T]       // 流数据项
-}
-
-// parentStreamReader 方法
-
-// peek 获取指定索引的数据。
-// 相同索引并发调用不安全，不同索引并发调用安全。
-// 确保每个子流读取器在单个 goroutine 中使用 for 循环。
-func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
-	elem := p.subStreamList[idx]
-	if elem == nil {
-		// 子流关闭后意外调用接收
-		return t, ErrRecvAfterClosed
-	}
-
-	// sync.Once 用于：
-	// 1. 写入当前元素的数据内容
-	// 2. 初始化当前元素的 next 字段为空元素（类似 copyStreamReaders 中的初始化）
-	// 3. 将子流指针移动到下一个元素
-	elem.once.Do(func() {
-		t, err = p.sr.Recv()
-		elem.item = streamItem[T]{chunk: t, err: err}
-		if err != io.EOF {
-			elem.next = &cpStreamElement[T]{}
-			p.subStreamList[idx] = elem.next
-		}
-	})
-
-	// 元素已设置且不会被再次修改
-	// 因此子流可以并发读取该元素的内容和 next 指针
-	t = elem.item.chunk
-	err = elem.item.err
-	if err != io.EOF {
-		p.subStreamList[idx] = elem.next
-	}
-
-	return t, err
-}
-
-// close 关闭指定索引的子流。
-// 所有子流关闭后，自动关闭原始流读取器。
-func (p *parentStreamReader[T]) close(idx int) {
-	// 重复关闭检查：避免重复关闭的安全性处理
-	if p.subStreamList[idx] == nil {
-		return // 避免重复关闭
-	}
-	p.subStreamList[idx] = nil
-
-	// 原子计数：使用原子操作确保并发安全
-	curClosedNum := atomic.AddUint32(&p.closedNum, 1)
-
-	// 全量关闭：所有子流关闭时的清理逻辑
-	allClosed := int(curClosedNum) == len(p.subStreamList)
-	if allClosed {
-		p.sr.Close()
-	}
-}
-
-// childStreamReader 方法
-
-// recv 从父流读取器中接收指定索引的数据。
-func (csr *childStreamReader[T]) recv() (T, error) {
-	return csr.parent.peek(csr.index)
-}
-
-// toStream 将子流读取器转换为流。
-func (csr *childStreamReader[T]) toStream() *stream[T] {
-	return toStream[T, *childStreamReader[T]](csr)
-}
-
-// close 关闭指定索引的子流。
-func (csr *childStreamReader[T]) close() {
-	csr.parent.close(csr.index)
-}
-
-// 4.4 内部工具函数
-
-// copyStreamReaders 从单个流读取器创建多个独立的子流读取器。
-// 每个子流读取器都可以独立地从原始流中读取数据。
-func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
-	cpsr := &parentStreamReader[T]{
-		sr:            sr,
-		subStreamList: make([]*cpStreamElement[T], n),
-		closedNum:     0,
-	}
-
-	// 初始化子流列表，使用空元素作为尾节点
-	// nil 元素表示子流已关闭，需要解引用
-	// 原始通道长度未知时，链接前后元素具有挑战性
-	// 使用前向指针会简化元素解引用，避免引用计数
-	elem := &cpStreamElement[T]{}
-
-	for i := range cpsr.subStreamList {
-		cpsr.subStreamList[i] = elem
-	}
-
-	ret := make([]*StreamReader[T], n)
-	for i := range ret {
-		ret[i] = &StreamReader[T]{
-			csr: &childStreamReader[T]{
-				parent: cpsr,
-				index:  i,
-			},
-			typ: readerTypeChild,
-		}
-	}
-
-	return ret
-}
-
-// toStream 将读取器转换为流。
-// 启动 goroutine 持续读取数据并发送到流中，处理 panic 并自动清理资源。
 func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 	ret := newStream[T](5)
 
 	go func() {
 		defer func() {
-			// 捕获 panic 并转换为错误发送到流中
 			panicErr := recover()
 			if panicErr != nil {
 				e := safe.NewPanicErr(panicErr, debug.Stack())
@@ -986,7 +660,6 @@ func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 				_ = ret.send(chunk, e)
 			}
 
-			// 清理资源：关闭发送端和读取器
 			ret.closeSend()
 			r.close()
 		}()
@@ -1007,14 +680,254 @@ func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 	return ret
 }
 
-// arrToStream 将数组转换为流。
-// 一次性发送所有数组元素到流中，然后关闭发送端。
-func arrToStream[T any](arr []T) *stream[T] {
-	s := newStream[T](len(arr))
-	for i := range arr {
-		s.send(arr[i], nil)
-	}
-	s.closeSend()
+func (srw *streamReaderWithConvert[T]) toStream() *stream[T] {
+	return toStream[T, *streamReaderWithConvert[T]](srw)
+}
 
-	return s
+type cpStreamElement[T any] struct {
+	once sync.Once
+	next *cpStreamElement[T]
+	item streamItem[T]
+}
+
+// copyStreamReaders 从单个 StreamReader 创建多个独立的 StreamReader。
+// 每个子 StreamReader 可以独立地从原始流读取。
+func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
+	cpsr := &parentStreamReader[T]{
+		sr:            sr,
+		subStreamList: make([]*cpStreamElement[T], n),
+		closedNum:     0,
+	}
+
+	// 使用空元素初始化 subStreamList，该元素充当尾节点。
+	// nil 元素（用于解引用）表示子流已关闭。
+	// 当原始通道的长度未知时，链接前一个和当前元素具有挑战性。
+	// 此外，使用前向指针会使元素解引用变得复杂，可能需要引用计数。
+	elem := &cpStreamElement[T]{}
+
+	for i := range cpsr.subStreamList {
+		cpsr.subStreamList[i] = elem
+	}
+
+	ret := make([]*StreamReader[T], n)
+	for i := range ret {
+		ret[i] = &StreamReader[T]{
+			csr: &childStreamReader[T]{
+				parent: cpsr,
+				index:  i,
+			},
+			typ: readerTypeChild,
+		}
+	}
+
+	return ret
+}
+
+type parentStreamReader[T any] struct {
+	// sr 是原始 StreamReader。
+	sr *StreamReader[T]
+
+	// subStreamList 将每个子流的索引映射到其最新读取的块。
+	// 每个值来自 cpStreamElement 的隐藏链表。
+	subStreamList []*cpStreamElement[T]
+
+	// closedNum 是已关闭子流的计数。
+	closedNum uint32
+}
+
+// peek 对相同 idx 的并发使用不安全，但对不同 idx 是安全的。
+// 确保每个子 StreamReader 在单个 goroutine 中使用 for 循环。
+func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
+	elem := p.subStreamList[idx]
+	if elem == nil {
+		// 子流关闭后意外调用接收。
+		return t, ErrRecvAfterClosed
+	}
+
+	// 这里的 sync.Once 用于：
+	// 1. 写入此 cpStreamElement 的内容。
+	// 2. 使用空的 cpStreamElement 初始化此 cpStreamElement 的 'next' 字段，
+	//    类似于 copyStreamReaders 中的初始化。
+	elem.once.Do(func() {
+		t, err = p.sr.Recv()
+		elem.item = streamItem[T]{chunk: t, err: err}
+		if err != io.EOF {
+			elem.next = &cpStreamElement[T]{}
+			p.subStreamList[idx] = elem.next
+		}
+	})
+
+	// 元素已设置，不会再次修改。
+	// 因此，子流可以并发读取此元素的内容和 'next' 指针。
+	t = elem.item.chunk
+	err = elem.item.err
+	if err != io.EOF {
+		p.subStreamList[idx] = elem.next
+	}
+
+	return t, err
+}
+
+func (p *parentStreamReader[T]) close(idx int) {
+	if p.subStreamList[idx] == nil {
+		return // 避免多次关闭
+	}
+
+	p.subStreamList[idx] = nil
+
+	curClosedNum := atomic.AddUint32(&p.closedNum, 1)
+
+	allClosed := int(curClosedNum) == len(p.subStreamList)
+	if allClosed {
+		p.sr.Close()
+	}
+}
+
+type childStreamReader[T any] struct {
+	parent *parentStreamReader[T]
+	index  int
+}
+
+func (csr *childStreamReader[T]) recv() (T, error) {
+	return csr.parent.peek(csr.index)
+}
+
+func (csr *childStreamReader[T]) toStream() *stream[T] {
+	return toStream[T, *childStreamReader[T]](csr)
+}
+
+func (csr *childStreamReader[T]) close() {
+	csr.parent.close(csr.index)
+}
+
+// MergeStreamReaders 将多个 StreamReader 合并为一个。
+// 当需要将多个流合并为一个时非常有用。
+// 例如：
+//
+//	sr1, sw1 := schema.Pipe[string](2)
+//	sr2, sw2 := schema.Pipe[string](2)
+//	// ... 发送数据到 sw1 和 sw2 ...
+//
+//	sr := schema.MergeStreamReaders([]*schema.StreamReader[string]{sr1, sr2})
+//
+//	defer sr.Close()
+//	for {
+//		chunk, err := sr.Recv()
+//		if errors.Is(err, io.EOF) {
+//			break
+//		}
+//		fmt.Println(chunk)
+//	}
+func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
+	if len(srs) < 1 {
+		return nil
+	}
+
+	if len(srs) < 2 {
+		return srs[0]
+	}
+
+	var arr []T
+	var ss []*stream[T]
+
+	for _, sr := range srs {
+		switch sr.typ {
+		case readerTypeStream:
+			ss = append(ss, sr.st)
+		case readerTypeArray:
+			arr = append(arr, sr.ar.arr[sr.ar.index:]...)
+		case readerTypeMultiStream:
+			ss = append(ss, sr.msr.nonClosedStreams()...)
+		case readerTypeWithConvert:
+			ss = append(ss, sr.srw.toStream())
+		case readerTypeChild:
+			ss = append(ss, sr.csr.toStream())
+		default:
+			panic("impossible")
+		}
+	}
+
+	if len(ss) == 0 {
+		return &StreamReader[T]{
+			typ: readerTypeArray,
+			ar: &arrayReader[T]{
+				arr:   arr,
+				index: 0,
+			},
+		}
+	}
+
+	if len(arr) != 0 {
+		s := arrToStream(arr)
+		ss = append(ss, s)
+	}
+
+	return &StreamReader[T]{
+		typ: readerTypeMultiStream,
+		msr: newMultiStreamReader(ss),
+	}
+}
+
+// MergeNamedStreamReaders 将多个 StreamReader 合并为一个，并保留它们的名称。
+// 当源流到达 EOF 时，合并后的流将返回包含结束的源流名称的 SourceEOF 错误。
+// 当需要追踪哪个源流已完成时非常有用。
+// 例如：
+//
+//	sr1, sw1 := schema.Pipe[string](2)
+//	sr2, sw2 := schema.Pipe[string](2)
+//
+//	namedStreams := map[string]*StreamReader[string]{
+//		"stream1": sr1,
+//		"stream2": sr2,
+//	}
+//
+//	mergedSR := schema.MergeNamedStreamReaders(namedStreams)
+//	defer mergedSR.Close()
+//
+//	for {
+//		chunk, err := mergedSR.Recv()
+//		if err != nil {
+//			if sourceName, ok := schema.GetSourceName(err); ok {
+//				fmt.Printf("流 %s 已结束\n", sourceName)
+//				continue
+//			}
+//			if errors.Is(err, io.EOF) {
+//				break // 所有流都已结束
+//			}
+//			// 处理其他错误
+//		}
+//		fmt.Println(chunk)
+//	}
+func MergeNamedStreamReaders[T any](srs map[string]*StreamReader[T]) *StreamReader[T] {
+	if len(srs) < 1 {
+		return nil
+	}
+
+	ss := make([]*StreamReader[T], len(srs))
+	names := make([]string, len(srs))
+
+	i := 0
+	for name, sr := range srs {
+		ss[i] = sr
+		names[i] = name
+		i++
+	}
+
+	return InternalMergeNamedStreamReaders(ss, names)
+}
+
+func InternalMergeNamedStreamReaders[T any](srs []*StreamReader[T], names []string) *StreamReader[T] {
+	ss := make([]*stream[T], len(srs))
+
+	for i, sr := range srs {
+		ss[i] = sr.toStream()
+	}
+
+	msr := newMultiStreamReader(ss)
+	msr.sourceReaderNames = names
+
+	return &StreamReader[T]{
+		typ: readerTypeMultiStream,
+		msr: msr,
+	}
 }
