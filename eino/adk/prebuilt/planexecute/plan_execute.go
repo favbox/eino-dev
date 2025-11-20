@@ -25,6 +25,10 @@ import (
 	"github.com/favbox/eino/schema"
 )
 
+func init() {
+	schema.RegisterName[*defaultPlan]("_eino_adk_plan_execute_default_plan")
+}
+
 // Plan 表示包含一系列可执行步骤的执行计划。
 // 支持 JSON 序列化和反序列化，并提供对第一步的访问。
 type Plan interface {
@@ -369,6 +373,9 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 				compose.InvokableLambda(func(ctx context.Context, msg adk.Message) (plan Plan, err error) {
 					var planJSON string
 					if p.toolCall {
+						if len(msg.ToolCalls) == 0 {
+							return nil, fmt.Errorf("no tool call")
+						}
 						planJSON = msg.ToolCalls[0].Function.Arguments
 					} else {
 						planJSON = msg.Content

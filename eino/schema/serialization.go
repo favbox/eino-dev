@@ -12,6 +12,7 @@ func init() {
 	// 注册 Eino 框架的核心类型到序列化系统
 	// 确保所有内置类型都能正确持久化和恢复
 	RegisterName[Message]("_eino_message")
+	RegisterName[[]*Message]("_eino_message_slice")
 	RegisterName[Document]("_eino_document")
 	RegisterName[RoleType]("_eino_role_type")
 	RegisterName[ToolCall]("_eino_tool_call")

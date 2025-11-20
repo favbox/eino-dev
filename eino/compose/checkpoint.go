@@ -42,6 +42,7 @@ func init() {
 	schema.RegisterName[*dagChannel]("_eino_dag_channel")
 	schema.RegisterName[*pregelChannel]("_eino_pregel_channel")
 	schema.RegisterName[dependencyState]("_eino_dependency_state")
+	_ = serialization.GenericRegister[channel]("_eino_channel")
 }
 
 // CheckPointStore 检查点存储接口 - 定义检查点的获取和设置操作
